@@ -10,8 +10,9 @@ import (
 )
 
 type fakeRepo struct {
-	mu    sync.Mutex
-	items map[string]domain.ContextItem
+	mu        sync.Mutex
+	items     map[string]domain.ContextItem
+	createErr error // injectable; if set, Create returns this
 }
 
 func newFakeRepo() *fakeRepo {
@@ -21,6 +22,9 @@ func newFakeRepo() *fakeRepo {
 func (r *fakeRepo) Create(_ context.Context, item domain.ContextItem) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.createErr != nil {
+		return r.createErr
+	}
 	if _, exists := r.items[item.ID]; exists {
 		return fmt.Errorf("duplicate id")
 	}

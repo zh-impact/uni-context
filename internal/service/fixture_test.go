@@ -4,9 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/require"
 	"uni-context/internal/adapter/fsstore"
 	"uni-context/internal/port"
+
+	"github.com/stretchr/testify/require"
 )
 
 // fakeRepo is an in-memory port.ContextRepo for service tests.
@@ -14,9 +15,10 @@ import (
 // We hand-roll this rather than use a mock generator — the interface is small.
 
 type ingestFixture struct {
-	repo *fakeRepo
-	fs   port.FileStore
-	svc  *IngestService
+	repo   *fakeRepo
+	fs     port.FileStore
+	fsRoot string
+	svc    *IngestService
 }
 
 func newIngestFixture(t *testing.T) *ingestFixture {
@@ -26,8 +28,9 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 	fs, err := fsstore.New(root)
 	require.NoError(t, err)
 	return &ingestFixture{
-		repo: repo,
-		fs:   fs,
-		svc:  NewIngestService(repo, fs),
+		repo:   repo,
+		fs:     fs,
+		fsRoot: root,
+		svc:    NewIngestService(repo, fs),
 	}
 }

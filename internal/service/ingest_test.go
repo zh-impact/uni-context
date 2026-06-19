@@ -2,12 +2,16 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"uni-context/internal/domain"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"uni-context/internal/domain"
 )
 
 func TestIngest_Create_SmallContentInline(t *testing.T) {
@@ -15,9 +19,9 @@ func TestIngest_Create_SmallContentInline(t *testing.T) {
 	id, err := f.svc.Create(context.Background(), Input{
 		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
 		OwnerUserID: "u-1",
-		Title:      "Test",
-		Content:    "small content",
-		Tags:       []string{"t1"},
+		Title:       "Test",
+		Content:     "small content",
+		Tags:        []string{"t1"},
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, id)
@@ -86,4 +90,46 @@ func TestIngest_Create_DeduplicatesByContentHash(t *testing.T) {
 	got2, _ := f.repo.Get(context.Background(), id2)
 	assert.Equal(t, got1.ContentHash, got2.ContentHash)
 	assert.Equal(t, got1.ContentURI, got2.ContentURI)
+}
+
+// TestIngest_Create_RollsBackFileStoreOnRepoFailure locks in I2: when
+// large content has been externalized via fs.Put but repo.Create then
+// fails, the service must call fs.Delete to drop the refcount back to 0
+// (removing the file). Otherwise the filestore accumulates orphaned
+// refcount=1 entries that nothing references — a leak that becomes a
+// correctness problem in Plan 2 where the same flow also writes
+// embeddings.
+func TestIngest_Create_RollsBackFileStoreOnRepoFailure(t *testing.T) {
+	f := newIngestFixture(t)
+	large := strings.Repeat("a", 5000) // exceeds ContentInlineLimit (4KB)
+
+	// Force repo.Create to fail on the next call.
+	f.repo.createErr = fmt.Errorf("simulated persistence failure")
+
+	_, err := f.svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     large,
+	})
+	require.Error(t, err, "Create should propagate the repo error")
+
+	// fsstore layout: <root>/<hex[:2]>/<hex> + <hex>.meta. After Put +
+	// Delete (refcount 1→0), both files are removed. The fixture's fsRoot
+	// starts empty (t.TempDir), so any leftover file = orphan = rollback
+	// failed.
+	var orphans []string
+	err = filepath.WalkDir(f.fsRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		// fsRoot itself is empty dir; bucket dirs are fine if empty.
+		orphans = append(orphans, path)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Empty(t, orphans,
+		"filestore should be empty after rollback; found orphaned files: %v", orphans)
 }

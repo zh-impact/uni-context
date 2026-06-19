@@ -72,6 +72,14 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 	}
 
 	if err := s.repo.Create(ctx, item); err != nil {
+		// Roll back the filestore entry we just bumped. Without this,
+		// a failed repo.Create leaves an orphaned refcount=1 blob that
+		// nothing references. fs.Delete decrements refcount; when it
+		// hits 0 the file is removed. Only relevant when we externalized
+		// (item.ContentURI != "").
+		if item.ContentURI != "" {
+			_ = s.fs.Delete(item.ContentURI)
+		}
 		return "", fmt.Errorf("persist item: %w", err)
 	}
 	return item.ID, nil
