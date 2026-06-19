@@ -140,6 +140,16 @@ func (r *ContextRepo) List(ctx context.Context, f port.ItemFilter) ([]domain.Con
 		where = append(where, "project_id=?")
 		args = append(args, f.ProjectID)
 	}
+	if len(f.Tags) > 0 {
+		// OR semantics: an item matches if it carries ANY of the requested
+		// tags. Tags are stored as a JSON array, so json_each expands the
+		// item's tags into one row per tag and we test membership against
+		// the supplied filter set.
+		where = append(where, "EXISTS (SELECT 1 FROM json_each(tags) je WHERE je.value IN ("+placeholders(len(f.Tags))+"))")
+		for _, t := range f.Tags {
+			args = append(args, t)
+		}
+	}
 	if f.Cursor != "" {
 		ts, id, err := decodeCursor(f.Cursor)
 		if err != nil {

@@ -25,9 +25,10 @@ var userNoteCmd = &cobra.Command{
 }
 
 var (
-	noteTitle string
-	noteTags  []string
-	noteLimit int
+	noteTitle      string
+	noteTags       []string
+	noteTagsFilter []string
+	noteLimit      int
 )
 
 var userNoteAddCmd = &cobra.Command{
@@ -77,6 +78,7 @@ var userNoteListCmd = &cobra.Command{
 			Scopes:      []domain.Scope{domain.ScopeUser},
 			OwnerUserID: cfg.User.ID,
 			Kinds:       []domain.Kind{domain.KindNote},
+			Tags:        noteTagsFilter,
 			Limit:       noteLimit,
 		})
 		if err != nil {
@@ -174,6 +176,7 @@ var userNoteDeleteCmd = &cobra.Command{
 func init() {
 	userNoteAddCmd.Flags().StringVar(&noteTitle, "title", "", "note title")
 	userNoteAddCmd.Flags().StringSliceVar(&noteTags, "tag", nil, "tags (comma-separated or repeat)")
+	userNoteListCmd.Flags().StringSliceVar(&noteTagsFilter, "tag", nil, "filter by tag (OR semantics; comma-separated or repeat)")
 	userNoteListCmd.Flags().IntVar(&noteLimit, "limit", 20, "max items to return")
 
 	userNoteCmd.AddCommand(userNoteAddCmd, userNoteListCmd, userNoteGetCmd, userNoteDeleteCmd)

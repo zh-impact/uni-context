@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"testing"
 
+	"uni-context/internal/domain"
+	"uni-context/internal/port"
+
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"uni-context/internal/domain"
-	"uni-context/internal/port"
 )
 
 func setupRepo(t *testing.T) (port.ContextRepo, *sql.DB) {
@@ -105,6 +106,54 @@ func TestContextRepo_ListWithFilter(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, items, 2)
+}
+
+func TestContextRepo_ListWithTagsFilter(t *testing.T) {
+	// Tags filter uses OR semantics: an item matches if it has ANY of the
+	// requested tags. This matches the CLI UX intuition
+	// (`--tag go --tag python` = "go OR python"). Tags are stored as a JSON
+	// array, so the SQL uses json_each to enumerate the item's tags.
+	repo, _ := setupRepo(t)
+	ctx := context.Background()
+
+	withTags := func(tags ...string) domain.ContextItem {
+		item := newItem(t, domain.ScopeUser, domain.KindNote, domain.SourceManual)
+		item.Tags = tags
+		return item
+	}
+	require.NoError(t, repo.Create(ctx, withTags("go", "deploy")))
+	require.NoError(t, repo.Create(ctx, withTags("python", "scrape")))
+	require.NoError(t, repo.Create(ctx, withTags("go", "test")))
+	require.NoError(t, repo.Create(ctx, withTags("rust"))) // no overlap
+
+	// Single tag → 2 items (go appears on items 1 and 3)
+	items, _, err := repo.List(ctx, port.ItemFilter{
+		Tags:  []string{"go"},
+		Limit: 50,
+	})
+	require.NoError(t, err)
+	assert.Len(t, items, 2, "single tag 'go' should match 2 items")
+
+	// Two tags OR → 3 items (go×2 + python×1)
+	items, _, err = repo.List(ctx, port.ItemFilter{
+		Tags:  []string{"go", "python"},
+		Limit: 50,
+	})
+	require.NoError(t, err)
+	assert.Len(t, items, 3, "OR of {go, python} should match 3 items")
+
+	// Empty Tags → no filter, returns all 4
+	items, _, err = repo.List(ctx, port.ItemFilter{Limit: 50})
+	require.NoError(t, err)
+	assert.Len(t, items, 4, "empty Tags should not filter")
+
+	// Non-matching tag → 0 items
+	items, _, err = repo.List(ctx, port.ItemFilter{
+		Tags:  []string{"java"},
+		Limit: 50,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, items)
 }
 
 func TestContextRepo_CursorPagination(t *testing.T) {
