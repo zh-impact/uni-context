@@ -9,6 +9,12 @@ import (
 
 // Open opens a SQLite database at dbPath (file path or ":memory:") with the
 // PRAGMAs specified in the global constraints, then runs migrations.
+//
+// Note on WAL + :memory:: SQLite silently ignores `_journal_mode=WAL`
+// for in-memory databases — they always use MEMORY journal. This is
+// cosmetic (in-memory DBs have no cross-process readers to benefit from
+// WAL anyway), but worth knowing if you're debugging test behavior:
+// tests that pass `:memory:` won't exercise WAL. File-based tests do.
 func Open(dbPath string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_foreign_keys=on&_temp_store=MEMORY", dbPath)
 	db, err := sql.Open("sqlite3", dsn)
