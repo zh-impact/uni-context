@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 
 	"uni-context/internal/domain"
@@ -132,12 +133,19 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	}
 	overFetch := limit * 3
 
+	// Plan 2a contract: embed errors during hybrid search must degrade
+	// gracefully to fts-only (log + fall back), never abort the whole
+	// search. Same applies if the embedder misbehaves (wrong vector count)
+	// or the vector store fails transiently (table missing, DB corruption,
+	// Ollama down). Mirrors the warn-and-continue pattern in ingest.go:103-105.
 	queryVec, err := s.embedder.Embed(ctx, []string{req.Query})
 	if err != nil {
-		return SearchResponse{}, fmt.Errorf("embed query: %w", err)
+		fmt.Fprintf(os.Stderr, "warn: hybrid search embed failed, falling back to fts-only: %v\n", err)
+		return s.searchFTSOnly(ctx, req)
 	}
 	if len(queryVec) != 1 {
-		return SearchResponse{}, fmt.Errorf("embedder returned %d vectors for one query, expected 1", len(queryVec))
+		fmt.Fprintf(os.Stderr, "warn: hybrid search embedder returned %d vectors for one query, falling back to fts-only\n", len(queryVec))
+		return s.searchFTSOnly(ctx, req)
 	}
 
 	scopes := toStrings(req.Scopes)
@@ -148,7 +156,8 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 		Limit: overFetch, Scopes: scopes, Kinds: kinds,
 	})
 	if err != nil {
-		return SearchResponse{}, fmt.Errorf("vector search: %w", err)
+		fmt.Fprintf(os.Stderr, "warn: hybrid search vector lookup failed, falling back to fts-only: %v\n", err)
+		return s.searchFTSOnly(ctx, req)
 	}
 
 	fHits, err := s.searcher.SearchFTS(ctx, port.SearchQuery{Query: req.Query, Limit: overFetch})

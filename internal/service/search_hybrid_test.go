@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -195,4 +196,53 @@ func TestSearchService_Hybrid_DegradesToFTSWhenEmbedderNil(t *testing.T) {
 	require.Len(t, resp.Results, 1)
 	assert.Equal(t, []string{"fts"}, resp.Results[0].MatchedBy,
 		"degraded hybrid result must be flagged fts-only")
+}
+
+// errorEmbedder wraps a real Embedder but forces Embed to always fail.
+// Used to prove the embed-failure path in searchHybrid degrades to
+// fts-only instead of bubbling the error up.
+type errorEmbedder struct {
+	inner *fake.Embedder
+}
+
+func (e *errorEmbedder) Model() port.ModelInfo { return e.inner.Model() }
+func (e *errorEmbedder) Embed(_ context.Context, _ []string) ([][]float32, error) {
+	return nil, fmt.Errorf("simulated ollama outage")
+}
+
+// TestSearchService_Hybrid_DegradesToFTSOnEmbedError proves the Plan 2a
+// global constraint: when an embedder exists but errors transiently
+// (Ollama down, network blip, vector store corruption), searchHybrid
+// must NOT abort the whole search — it warns and falls back to fts-only,
+// returning whatever FTS finds with MatchedBy=["fts"].
+func TestSearchService_Hybrid_DegradesToFTSOnEmbedError(t *testing.T) {
+	// Build the same in-memory DB + searcher + repo shape as the
+	// nil-embedder test, but wire an errorEmbedder so searchHybrid
+	// actually enters the embed-failure branch (rather than being
+	// short-circuited by the s.embedder == nil check in Search).
+	_, repo, db := newMemVectorStore(t)
+	t.Cleanup(func() { _ = db.Close() })
+	searcher := sqlite.NewSearcher(db)
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, &errorEmbedder{inner: emb})
+
+	ctx := context.Background()
+	// Seed one FTS-matchable item. Vector writes are intentionally
+	// skipped — the test asserts the fts-only fallback path, which must
+	// not depend on any vector data being present.
+	item, _ := domain.NewContextItem(domain.ScopeUser, domain.KindNote, domain.SourceManual,
+		domain.NewItemParams{OwnerUserID: "u"})
+	item.Title = "deploy"
+	item.Content = "deploy steps"
+	require.NoError(t, repo.Create(ctx, item))
+
+	resp, err := svc.Search(ctx, SearchRequest{
+		Query: "deploy", Mode: SearchModeHybrid, Limit: 5,
+	})
+	require.NoError(t, err, "hybrid with failing embedder must not error — it degrades to fts-only")
+	require.NotEmpty(t, resp.Results, "degraded hybrid must still return FTS hits")
+	for _, r := range resp.Results {
+		assert.Equal(t, []string{"fts"}, r.MatchedBy,
+			"every result from a degraded hybrid search must be flagged fts-only")
+	}
 }
