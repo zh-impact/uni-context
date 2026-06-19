@@ -5,7 +5,7 @@ PKG     := ./...
 .PHONY: build test test-race lint fmt vet clean install
 
 build:
-	CGO_ENABLED=1 go build -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/unictx
+	CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/unictx
 
 test:
 	CGO_ENABLED=1 go test -tags 'sqlite_fts5' $(PKG)
