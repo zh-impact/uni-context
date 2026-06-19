@@ -16,10 +16,21 @@ import (
 
 type Searcher struct {
 	db *sql.DB
+	vs *VectorStore // composed for SearchVector; nil-safe fallback if not wired
 }
 
 func NewSearcher(db *sql.DB) *Searcher {
-	return &Searcher{db: db}
+	return &Searcher{db: db, vs: NewVectorStore(db)}
+}
+
+// SearchVector delegates to the composed VectorStore. The Searcher
+// interface unifies FTS and vector access for the service layer so
+// SearchService doesn't need to depend on VectorStore separately.
+func (s *Searcher) SearchVector(ctx context.Context, q port.VectorQuery) ([]port.VectorHit, error) {
+	if s.vs == nil {
+		return nil, fmt.Errorf("searcher: vector store not wired")
+	}
+	return s.vs.Search(ctx, q)
 }
 
 // ftsQueryString builds a safe FTS5 query: wrap the raw string in double
@@ -79,9 +90,9 @@ func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.Se
 	var hits []port.SearchHit
 	for rows.Next() {
 		var (
-			h            port.SearchHit
-			titleSnip    sql.NullString
-			contentSnip  sql.NullString
+			h           port.SearchHit
+			titleSnip   sql.NullString
+			contentSnip sql.NullString
 		)
 		if err := rows.Scan(&h.ID, &h.Score, &titleSnip, &contentSnip); err != nil {
 			return nil, err
