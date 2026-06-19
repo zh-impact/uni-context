@@ -1,0 +1,20 @@
+# Go
+/dist/
+*.test
+*.out
+coverage.txt
+
+# Build artifacts
+/unictx
+/bin/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Local data (never commit user data)
+/.local/
