@@ -27,6 +27,22 @@ var doctorCmd = &cobra.Command{
 			return fmt.Errorf("read schema version: %w", err)
 		}
 		fmt.Printf("schema version: %s\n", version)
+
+		// Embedder check: when configured, exercise the live service with
+		// a one-token embed. Otherwise report Plan 1 mode so users can see
+		// why hybrid search is unavailable.
+		if a.Embedder != nil {
+			_, err := a.Embedder.Embed(cmd.Context(), []string{"ping"})
+			if err != nil {
+				fmt.Printf("  embedder: FAIL (%v)\n", err)
+			} else {
+				info := a.Embedder.Model()
+				fmt.Printf("  embedder: OK (%s, %d-dim)\n", info.Slug, info.Dimension)
+			}
+		} else {
+			fmt.Println("  embedder: disabled (Plan 1 mode; set embedder.enabled=true to enable)")
+		}
+
 		fmt.Println("status:         OK")
 		return nil
 	},
