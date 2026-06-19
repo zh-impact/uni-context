@@ -9,6 +9,11 @@ import (
 	"uni-context/internal/port"
 )
 
+// Known limitation: the FTS5 trigram tokenizer requires queries of at
+// least 3 characters. Shorter queries (e.g. the 2-character CJK word
+// `部署`) silently return zero results. See CHANGELOG.md "Known
+// Limitations" — the fix lands in Plan 2 via vector embeddings.
+
 type Searcher struct {
 	db *sql.DB
 }
