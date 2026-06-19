@@ -8,13 +8,13 @@ build:
 	CGO_ENABLED=1 go build -ldflags "-X main.version=$(VERSION)" -o $(BIN) ./cmd/unictx
 
 test:
-	CGO_ENABLED=1 go test $(PKG)
+	CGO_ENABLED=1 go test -tags 'sqlite_fts5' $(PKG)
 
 test-race:
-	CGO_ENABLED=1 go test -race $(PKG)
+	CGO_ENABLED=1 go test -race -tags 'sqlite_fts5' $(PKG)
 
 test-integration:
-	CGO_ENABLED=1 go test -tags=integration $(PKG)
+	CGO_ENABLED=1 go test -tags 'integration,sqlite_fts5' $(PKG)
 
 fmt:
 	gofmt -s -w .
