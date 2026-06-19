@@ -130,6 +130,24 @@ func TestSearcher_FTS_QueryInjectionSafety(t *testing.T) {
 	assert.Empty(t, hits, "operator injection should be neutralized by quote escaping")
 }
 
+func TestSearcher_FTS_FallsBackToContentSnippet(t *testing.T) {
+	// When a note has no title (title=""), the snippet extracted from the
+	// title column is empty. The searcher must fall back to a content-column
+	// snippet so search results still show useful context for title-less
+	// notes (a common case when the user runs `unictx user note add foo`
+	// without --title).
+	db := openMemWithSampleData(t, []domain.ContextItem{
+		makeItem("", "important content about deployment here"),
+	})
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "important content", Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "title-less note should still be findable via content match")
+	assert.Contains(t, hits[0].Snippet, "important",
+		"snippet must come from content column when title snippet is empty; got %q", hits[0].Snippet)
+}
+
 func makeItem(title, content string) domain.ContextItem {
 	item, _ := domain.NewContextItem(domain.ScopeUser, domain.KindNote, domain.SourceManual,
 		domain.NewItemParams{OwnerUserID: "u"})

@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
 	"uni-context/internal/service"
+
+	"github.com/spf13/cobra"
 )
 
 var userCmd = &cobra.Command{
@@ -99,8 +100,7 @@ var userNoteListCmd = &cobra.Command{
 			return nil
 		}
 		for _, it := range items {
-			tags := strings.Join(it.Tags, ",")
-			fmt.Printf("%s  %s  [%s]\n", it.ID, it.Title, tags)
+			fmt.Println(formatListItem(it))
 		}
 		return nil
 	},
@@ -208,4 +208,40 @@ func inputFromFlags(scope domain.Scope, kind domain.Kind, source domain.Source,
 		Content:     content,
 		Tags:        tags,
 	}
+}
+
+// listPreviewLen is the maximum rune count of content shown as a fallback
+// title in list output when an item has no title.
+const listPreviewLen = 50
+
+// formatListItem renders one row of `user note list`. When the item has a
+// non-empty title, the title is shown verbatim. When the title is empty
+// (common when `add` was called without --title), a preview of the inline
+// content is shown instead so the user sees something useful. When content
+// is also empty (externalized to FileStore), an "(externalized)" placeholder
+// is shown — the full content can always be retrieved with `get <id>`.
+func formatListItem(item domain.ContextItem) string {
+	label := item.Title
+	if label == "" {
+		switch {
+		case item.Content != "":
+			label = previewRunes(item.Content, listPreviewLen)
+		case item.ContentURI != "":
+			label = "(externalized)"
+		default:
+			label = "(no content)"
+		}
+	}
+	tags := strings.Join(item.Tags, ",")
+	return fmt.Sprintf("%s  %s  [%s]", item.ID, label, tags)
+}
+
+// previewRunes returns the first n runes of s, appending an ellipsis if s
+// was truncated.
+func previewRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }

@@ -35,18 +35,19 @@ func ftsQueryString(raw string) string {
 	return `"` + escaped + `"`
 }
 
-// searchSQL extracts the snippet from column index 0 (title) of the FTS5
-// virtual table. Title is the canonical human-readable identifier of a
-// context_item and is where users typically search from. Using content
-// (column 2) would frequently return a snippet that does not contain the
-// matched term when the match lives in the title.
+// searchSQL extracts snippets from BOTH the title column (index 0) and the
+// content column (index 2). The caller prefers the title snippet (title is
+// the canonical human-readable identifier) but falls back to the content
+// snippet when the title is empty — a common case when the user runs
+// `unictx user note add <content>` without --title.
 //
 // No highlight markers are emitted: presentation concerns belong to the
 // caller, not the searcher. The snippet function's "ellipsis" argument is
 // also empty so the returned text is a verbatim slice of the column.
 const searchSQL = `
 SELECT ci.id, bm25(context_fts) AS score,
-       snippet(context_fts, 0, '', '', '…', 16) AS snip
+       snippet(context_fts, 0, '', '', '…', 16) AS title_snip,
+       snippet(context_fts, 2, '', '', '…', 16) AS content_snip
 FROM context_fts
 JOIN context_item ci ON ci.rowid = context_fts.rowid
 WHERE context_fts MATCH ?
@@ -72,9 +73,21 @@ func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.Se
 
 	var hits []port.SearchHit
 	for rows.Next() {
-		var h port.SearchHit
-		if err := rows.Scan(&h.ID, &h.Score, &h.Snippet); err != nil {
+		var (
+			h            port.SearchHit
+			titleSnip    sql.NullString
+			contentSnip  sql.NullString
+		)
+		if err := rows.Scan(&h.ID, &h.Score, &titleSnip, &contentSnip); err != nil {
 			return nil, err
+		}
+		// Prefer title snippet; fall back to content snippet when title is
+		// empty (e.g. user ran `add` without --title).
+		switch {
+		case titleSnip.String != "":
+			h.Snippet = titleSnip.String
+		case contentSnip.String != "":
+			h.Snippet = contentSnip.String
 		}
 		// bm25 returns negative scores (more negative = better match).
 		// Negate so higher score = better match.
