@@ -3,8 +3,9 @@ package cli
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
 	"uni-context/internal/config"
+
+	"github.com/spf13/cobra"
 )
 
 var configCmd = &cobra.Command{

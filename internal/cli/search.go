@@ -5,9 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"uni-context/internal/domain"
 	"uni-context/internal/service"
+
+	"github.com/spf13/cobra"
 )
 
 var (

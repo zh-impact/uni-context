@@ -112,7 +112,9 @@ func TestE2E_NoteLifecycleAndSearch(t *testing.T) {
 
 	// Search should now miss it
 	outSearch2, _ := run(t, home, "search", "deploy", "--json")
-	var searchResp2 struct{ Total int `json:"total"` }
+	var searchResp2 struct {
+		Total int `json:"total"`
+	}
 	_ = json.Unmarshal([]byte(outSearch2), &searchResp2)
 	assert.Equal(t, 0, searchResp2.Total, "deleted note should not match")
 }
@@ -130,7 +132,9 @@ func TestE2E_LargeContentExternalized(t *testing.T) {
 	cmd.Stdout = &out
 	require.NoError(t, cmd.Run())
 
-	var resp struct{ ID string `json:"id"` }
+	var resp struct {
+		ID string `json:"id"`
+	}
 	require.NoError(t, json.Unmarshal(out.Bytes(), &resp))
 
 	// get should return full content

@@ -5,9 +5,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
 	"uni-context/internal/app"
 	"uni-context/internal/config"
+
+	"github.com/spf13/cobra"
 )
 
 var (
