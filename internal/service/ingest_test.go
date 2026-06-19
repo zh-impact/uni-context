@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"uni-context/internal/adapter/embedder/fake"
 	"uni-context/internal/domain"
+	"uni-context/internal/port"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,4 +134,70 @@ func TestIngest_Create_RollsBackFileStoreOnRepoFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, orphans,
 		"filestore should be empty after rollback; found orphaned files: %v", orphans)
+}
+
+// TestIngest_Create_TriggersEmbed_WhenConfigured verifies that when an
+// EmbedService is wired in via NewIngestServiceWithEmbedder, Create
+// synchronously writes a vector and flips any_embedding=1. This is the
+// happy path of Plan 2a's synchronous embed path.
+func TestIngest_Create_TriggersEmbed_WhenConfigured(t *testing.T) {
+	vs, repo, db := newMemVectorStore(t)
+	defer db.Close()
+	emb := fake.New("fake-model", 8)
+	embedSvc := NewEmbedService(emb, vs, repo)
+	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
+
+	ctx := context.Background()
+	id, err := svc.Create(ctx, Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Title:       "deploy",
+		Content:     "small",
+	})
+	require.NoError(t, err)
+
+	// any_embedding flipped to 1 by the embed path
+	got, _ := repo.Get(ctx, id)
+	assert.Equal(t, 1, got.AnyEmbedding, "Create with embedder should set any_embedding=1")
+
+	// Vector is searchable: query with the fake's embedding of the
+	// same composed text the service fed in (title + "\n\n" + content).
+	vecs, _ := emb.Embed(ctx, []string{"deploy\n\nsmall"})
+	hits, err := vs.Search(ctx, port.VectorQuery{
+		Vector: vecs[0], Model: "fake-model", Limit: 5,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, id, hits[0].ID)
+}
+
+// TestIngest_Create_SucceedsWhenEmbedFails locks in the error-tolerance
+// contract: a broken embedder must NOT fail Create. The item is still
+// persisted and FTS-searchable; any_embedding stays 0.
+func TestIngest_Create_SucceedsWhenEmbedFails(t *testing.T) {
+	vs, repo, db := newMemVectorStore(t)
+	defer db.Close()
+	emb := &failingEmbedder{}
+	embedSvc := NewEmbedService(emb, vs, repo)
+	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
+
+	id, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     "x",
+	})
+	require.NoError(t, err, "Create must succeed even if embed fails")
+	require.NotEmpty(t, id)
+
+	got, _ := repo.Get(context.Background(), id)
+	assert.Equal(t, 0, got.AnyEmbedding, "any_embedding stays 0 on embed failure")
+}
+
+// failingEmbedder is a port.Embedder that always errors. Used to verify
+// IngestService.Create tolerates embed failures.
+type failingEmbedder struct{}
+
+func (failingEmbedder) Model() port.ModelInfo { return port.ModelInfo{Slug: "fail", Dimension: 1} }
+func (failingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, fmt.Errorf("simulated embedder failure")
 }

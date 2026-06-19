@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"unicode"
 
@@ -11,12 +12,22 @@ import (
 )
 
 type IngestService struct {
-	repo port.ContextRepo
-	fs   port.FileStore
+	repo  port.ContextRepo
+	fs    port.FileStore
+	embed *EmbedService // nil = embedding disabled (Plan 1 compat)
 }
 
 func NewIngestService(repo port.ContextRepo, fs port.FileStore) *IngestService {
 	return &IngestService{repo: repo, fs: fs}
+}
+
+// NewIngestServiceWithEmbedder wires an optional EmbedService. If embed
+// is nil, behavior is identical to NewIngestService (Plan 1: no vector
+// writes). When non-nil, Create embeds synchronously after a successful
+// repo.Create; embed failure is non-fatal (warned to stderr, item is
+// still returned and FTS-searchable).
+func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, embed *EmbedService) *IngestService {
+	return &IngestService{repo: repo, fs: fs, embed: embed}
 }
 
 // Input is the user-facing write request.
@@ -82,7 +93,28 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 		}
 		return "", fmt.Errorf("persist item: %w", err)
 	}
+
+	// Plan 2a: synchronous embed after the item is durably persisted.
+	// Embedding failure is non-fatal — the item is already saved and
+	// FTS-searchable. Warn to stderr; future Plan 2b async queue will
+	// retry. any_embedding stays 0, which SearchService treats as
+	// "not vector-searchable" (correct).
+	if s.embed != nil {
+		if err := s.embed.Embed(ctx, item.ID, item.Title, contentForEmbed(item)); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: embed failed for %s: %v\n", item.ID, err)
+		}
+	}
 	return item.ID, nil
+}
+
+// contentForEmbed returns the text fed to the embedder. Plan 2a uses
+// inline Content only. LIMITATION: items whose content was externalized
+// to FileStore (Content == "", ContentURI != "") embed with EMPTY
+// content — only the title contributes to the vector. Plan 2b hydrates
+// from FileStore before embedding to fix this; for now, large items are
+// effectively title-only embeddings.
+func contentForEmbed(item domain.ContextItem) string {
+	return item.Content
 }
 
 func countWords(s string) int {
