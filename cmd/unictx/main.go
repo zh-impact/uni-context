@@ -1,17 +1,18 @@
 package main
 
 import (
-    "fmt"
-    "os"
+	"fmt"
+	"os"
+
+	"uni-context/internal/cli"
 )
 
 var version = "dev"
 
 func main() {
-    if len(os.Args) > 1 && os.Args[1] == "--version" {
-        fmt.Println(version)
-        return
-    }
-    fmt.Fprintln(os.Stderr, "uni-context", version, "(skeleton — see Plan 1 task 11+)")
-    os.Exit(1)
+	cli.SetVersion(version)
+	if err := cli.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 }
