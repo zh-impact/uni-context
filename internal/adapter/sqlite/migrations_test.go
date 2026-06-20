@@ -19,7 +19,7 @@ func TestMigrations_RunOnFreshDB(t *testing.T) {
 	var version string
 	err = db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version)
 	require.NoError(t, err)
-	assert.Equal(t, "1", version)
+	assert.Equal(t, "3", version)
 
 	// Tables exist
 	for _, table := range []string{"context_item", "context_fts", "project", "schema_meta"} {
@@ -82,4 +82,50 @@ func TestMigrations_0002_IdempotentFromFreshDB(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM embedding_model WHERE is_default=1`).Scan(&n))
 	assert.Equal(t, 1, n)
+}
+
+func TestMigrations_0003_AddsRetryColumns(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	require.NoError(t, Migrate(db))
+
+	// schema_version is now "3" after 0003
+	var version string
+	require.NoError(t, db.QueryRow(
+		`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version))
+	assert.Equal(t, "3", version)
+
+	// attempts + last_error columns exist on context_embedding.
+	// PRAGMA table_info is the canonical way to inspect columns.
+	rows, err := db.Query(`PRAGMA table_info(context_embedding)`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue any // sqlite gives NULL for columns without default
+		require.NoError(t, rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk))
+		cols[name] = true
+	}
+	assert.True(t, cols["attempts"], "attempts column must exist after 0003")
+	assert.True(t, cols["last_error"], "last_error column must exist after 0003")
+
+	// attempts has DEFAULT 0: INSERT without specifying it should succeed
+	// and the column should read back as 0.
+	_, err = db.Exec(`INSERT INTO context_embedding (item_id, model_slug, embedded_at, status)
+		VALUES ('test-0003', 'bge-m3', 0, 'done')`)
+	require.NoError(t, err)
+
+	var attempts int
+	var lastError sql.NullString
+	require.NoError(t, db.QueryRow(
+		`SELECT attempts, last_error FROM context_embedding WHERE item_id='test-0003'`).
+		Scan(&attempts, &lastError))
+	assert.Equal(t, 0, attempts, "attempts must default to 0")
+	assert.False(t, lastError.Valid, "last_error must be NULL by default")
 }
