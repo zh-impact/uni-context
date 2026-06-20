@@ -1122,8 +1122,7 @@ func TestBackfillService_ProcessesOnlyUnembeddedItems(t *testing.T) {
 	report, err := svc.Run(context.Background(), 0, false)
 	require.NoError(t, err)
 
-	assert.Equal(t, 2, report.Embedded, "only A and B embedded; C skipped")
-	assert.Equal(t, 1, report.Skipped, "C was already embedded")
+	assert.Equal(t, 2, report.Embedded, "only A and B embedded; C excluded by filter")
 	assert.Equal(t, 0, report.Failed)
 
 	// Verify A and B now have status='done'
@@ -1248,9 +1247,10 @@ type BackfillFailure struct {
 }
 
 type BackfillReport struct {
-	Scanned  int // candidates found (any_embedding=0)
+	Scanned  int // candidates found (any_embedding=0). Skipped is NOT a
+	// field — backfill pre-filters via ItemFilter.AnyEmbedding so
+	// already-embedded items are excluded before iteration begins.
 	Embedded int // successfully embedded this run
-	Skipped  int // already-embedded items (sanity check; should be 0 since List filters)
 	Failed   int
 	Failures []BackfillFailure
 }
@@ -1267,8 +1267,11 @@ func (s *BackfillService) Run(ctx context.Context, limit int, dryRun bool) (Back
 	// Use ContextRepo.List with an any_embedding filter. The current
 	// ItemFilter doesn't have an any_embedding field — see Step 4 for
 	// the small addition.
+	// AnyEmbedding is *int — take address of zero value so the filter
+	// is honored (nil pointer = no filter).
+	anyEmbedZero := 0
 	items, _, err := s.repo.List(ctx, port.ItemFilter{
-		AnyEmbedding: 0, // 0 = unembedded only; 1 = embedded only; omit = both
+		AnyEmbedding: &anyEmbedZero, // 0 = unembedded only
 		Limit:        limit,
 	})
 	if err != nil {
@@ -1361,16 +1364,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEmbedBackfillCmd_RequiresEnabledEmbedder(t *testing.T) {
-	// Plan 1 mode (embedder.enabled=false): command should error cleanly.
-	// We can't easily run the full cobra command without spinning up the
-	// whole app; instead, exercise the RunE directly via loadApp.
-	// This test is a placeholder — the full integration is via the e2e
-	// test in Task 7. Here we just verify the command exists and rejects
-	// when App.Backfill is nil.
-	t.Skip("full CLI invocation tested via e2e in Task 7; here we verify command shape only")
-}
-
 func TestEmbedCmd_HasBackfillAndWorkerSubcommands(t *testing.T) {
 	// Structural test: verify the embed parent command has exactly two
 	// subcommands. Prevents accidental removal during refactoring.
@@ -1382,8 +1375,6 @@ func TestEmbedCmd_HasBackfillAndWorkerSubcommands(t *testing.T) {
 	assert.Contains(t, names, "worker")
 }
 ```
-
-Replace the placeholder test with a real one once `embedCmd` exists (Step 7).
 
 - [ ] **Step 7: Implement the CLI**
 
