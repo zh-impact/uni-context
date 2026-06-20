@@ -64,9 +64,9 @@ var embedBackfillCmd = &cobra.Command{
 }
 
 // embedWorkerCmd is the long-running retry loop for status='failed'
-// embeddings. Task 5 creates the command so `unictx embed worker` exists
-// in --help; Task 6 populates App.Worker (currently nil) and replaces
-// this RunE stub with the real loop.
+// embeddings. Polls EmbeddingRepo.ListFailed at the configured interval,
+// retries each via EmbedService.Embed (which writes the new status row),
+// and exits cleanly on Ctrl+C (SIGINT/SIGTERM).
 var embedWorkerCmd = &cobra.Command{
 	Use:   "worker",
 	Short: "Long-running retry loop for status=failed embeddings (Ctrl+C to stop)",
@@ -77,18 +77,12 @@ var embedWorkerCmd = &cobra.Command{
 		}
 		defer a.DB.Close()
 		if a.Worker == nil {
-			// Task 6 wires App.Worker. Until then this command is a
-			// placeholder so `unictx embed --help` lists it.
-			return fmt.Errorf("worker not yet wired (Task 6)")
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
-		// Unreachable until Task 6 (the nil-check above returns first).
-		// Kept here to document the intended shape so Task 6 can drop in
-		// the real call without restructuring the RunE.
 		ctx := signalContext()
 		fmt.Fprintf(os.Stderr, "worker: polling every %s, Ctrl+C to stop\n", workerInterval)
-		_ = ctx
-		return fmt.Errorf("worker not yet wired (Task 6)")
+		return a.Worker.Run(ctx, workerInterval)
 	},
 }
 

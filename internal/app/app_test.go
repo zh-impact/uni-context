@@ -32,8 +32,8 @@ func TestWire_EmbedderEnabled_ConstructsEmbeddingRepo(t *testing.T) {
 	assert.NotNil(t, a.Search, "SearchService constructed")
 	// Plan 2b Task 5: Backfill now wired when embedder is enabled.
 	assert.NotNil(t, a.Backfill, "Backfill constructed when embedder enabled")
-	// Worker is still nil — Task 6 populates it.
-	assert.Nil(t, a.Worker, "Worker populated in Task 6")
+	// Plan 2b Task 6: Worker now wired when embedder is enabled.
+	assert.NotNil(t, a.Worker, "Worker constructed when embedder enabled")
 }
 
 func TestWire_EmbedderDisabled_LeavesEmbeddingFieldsNil(t *testing.T) {
