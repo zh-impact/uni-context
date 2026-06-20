@@ -97,8 +97,16 @@ Plan 2b implementer can find them without grepping.
    (`embedding_model` table with `vec_<model>` tables per row), but
    only `bge-m3` is wired. **Plan 2c fix:** runtime model registry.
 
-6. **Only the Ollama provider.** No OpenAI-compat / LMStudio yet.
-   **Plan 2d fix.**
+6. **OpenAI-compat provider shipped as a Plan 2d preview.** The
+   `openai` provider (`internal/adapter/embedder/openai`) supports any
+   server exposing `POST /v1/embeddings`: LMStudio local, OpenAI hosted,
+   vLLM, etc. Set `embedder.provider: openai` and `embedder.base_url`
+   (default `http://localhost:1234/v1`, LMStudio's port). `api_key` is
+   optional — local servers ignore it, OpenAI hosted requires it. What
+   this preview does NOT include: provider auto-detection, OpenAI
+   specific features (encoding formats, dimensions param, native
+   batched calls beyond a single request), model catalog integration,
+   error classification. Those remain Plan 2d.
 
 7. **No backfill.** Plan 1 items created before enabling
    `embedder.enabled=true` will not be embedded. **Plan 2b fix:**
@@ -115,5 +123,8 @@ after 2a:
   `FileStore.Get` in `EmbedService`)
 - `context_embedding` status rows for retry tracking → **Plan 2b**
 - Multi-model registry / runtime DDL → **Plan 2c**
-- OpenAI-compat providers (LMStudio, OpenAI, etc.) → **Plan 2d**
+- OpenAI-compat polish (provider auto-detection, encoding formats,
+  dimensions param, model catalog integration, error classification).
+  The core `openai` adapter shipped as a Plan 2d preview — see Plan 2a
+  section above. → **Plan 2d**
 - `--mode vector-only` → trivial follow-up, skipped in 2a

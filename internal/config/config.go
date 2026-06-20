@@ -27,10 +27,25 @@ type EmbedderConfig struct {
 	// supports hybrid mode. Default false (Plan 1 compat).
 	Enabled bool `yaml:"enabled"`
 
-	Provider  string `yaml:"provider"`  // "ollama" (only option in 2a)
-	BaseURL   string `yaml:"base_url"`  // default http://localhost:11434
+	// Provider selects the embedder adapter. Plan 2a shipped "ollama";
+	// this patch adds "openai" for any OpenAI-compatible server
+	// (LMStudio local, OpenAI hosted, vLLM, etc.).
+	Provider string `yaml:"provider"` // "ollama" or "openai"
+
+	// BaseURL is the API root. For Ollama, defaults to
+	// http://localhost:11434. For OpenAI-compat, defaults to
+	// http://localhost:1234/v1 (LMStudio's default port). OpenAI's
+	// hosted API users should set this to https://api.openai.com/v1.
+	// The OpenAI adapter appends "/embeddings" to this value.
+	BaseURL string `yaml:"base_url"`
+
 	Model     string `yaml:"model"`     // default "bge-m3"
 	Dimension int    `yaml:"dimension"` // default 1024
+
+	// APIKey is optional. Required for OpenAI's hosted API; local
+	// servers (LMStudio, vLLM) typically ignore it. When empty, the
+	// OpenAI adapter omits the Authorization header entirely.
+	APIKey string `yaml:"api_key"`
 }
 
 // Load reads config from path (if it exists) and applies defaults.
@@ -55,8 +70,16 @@ func Load(path string) (*Config, error) {
 		if cfg.Embedder.Provider == "" {
 			cfg.Embedder.Provider = "ollama"
 		}
+		// BaseURL default is provider-specific: Ollama serves at
+		// :11434, OpenAI-compat servers conventionally live at /v1
+		// under whatever port (LMStudio's default is :1234).
 		if cfg.Embedder.BaseURL == "" {
-			cfg.Embedder.BaseURL = "http://localhost:11434"
+			switch cfg.Embedder.Provider {
+			case "ollama":
+				cfg.Embedder.BaseURL = "http://localhost:11434"
+			case "openai":
+				cfg.Embedder.BaseURL = "http://localhost:1234/v1"
+			}
 		}
 		if cfg.Embedder.Model == "" {
 			cfg.Embedder.Model = "bge-m3"

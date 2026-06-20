@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"uni-context/internal/adapter/embedder/ollama"
+	"uni-context/internal/adapter/embedder/openai"
 	"uni-context/internal/adapter/fsstore"
 	"uni-context/internal/adapter/sqlite"
 	"uni-context/internal/config"
@@ -57,14 +58,18 @@ func Wire(cfg *config.Config) (*App, error) {
 	proj := sqlite.NewProjectRepo(db)
 	searcher := sqlite.NewSearcher(db)
 
-	// Embedder + EmbedService wiring (Plan 2a). Only constructed when
-	// the user explicitly opts in via embedder.enabled.
+	// Embedder + EmbedService wiring (Plan 2a + openai-compat preview).
+	// Only constructed when the user explicitly opts in via embedder.enabled.
 	var embedder port.Embedder
 	var embedSvc *service.EmbedService
 	if cfg.Embedder.Enabled {
 		switch cfg.Embedder.Provider {
 		case "ollama":
 			embedder = ollama.New(cfg.Embedder.BaseURL, cfg.Embedder.Model, cfg.Embedder.Dimension)
+		case "openai":
+			// OpenAI-compat: LMStudio (local, no key), OpenAI hosted
+			// (key required), vLLM, etc. apiKey empty = no auth header.
+			embedder = openai.New(cfg.Embedder.BaseURL, cfg.Embedder.Model, cfg.Embedder.Dimension, cfg.Embedder.APIKey)
 		default:
 			_ = db.Close()
 			return nil, fmt.Errorf("unsupported embedder provider: %s", cfg.Embedder.Provider)
