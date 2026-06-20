@@ -82,12 +82,12 @@ func (r *ContextRepo) Update(ctx context.Context, item domain.ContextItem) error
         UPDATE context_item SET
             title=?, summary=?, content=?, content_uri=?, content_mime=?,
             content_hash=?, language=?, tags=?, source_meta=?, visibility=?,
-            confidence=?, word_count=?, updated_at=?, version=?
+            confidence=?, word_count=?, any_embedding=?, updated_at=?, version=?
         WHERE id=?`,
 		item.Title, item.Summary, item.Content,
 		nullable(item.ContentURI), nullable(item.ContentMIME), nullable(item.ContentHash),
 		nullable(item.Language), string(tags), string(meta), string(item.Visibility),
-		item.Confidence, item.WordCount, item.UpdatedAt.Unix(), item.Version, item.ID,
+		item.Confidence, item.WordCount, item.AnyEmbedding, item.UpdatedAt.Unix(), item.Version, item.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update item: %w", err)

@@ -4,8 +4,17 @@ import (
 	"database/sql"
 	"fmt"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// init registers the vec0 module process-globally before any sql.Open
+// call. sqlite-vec-go-bindings' Auto() hooks mattn/go-sqlite3's driver
+// so every "sqlite3" connection in this process supports vec0 virtual
+// tables. Idempotent.
+func init() {
+	sqlite_vec.Auto()
+}
 
 // Open opens a SQLite database at dbPath (file path or ":memory:") with the
 // PRAGMAs specified in the global constraints, then runs migrations.
