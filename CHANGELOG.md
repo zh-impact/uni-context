@@ -222,3 +222,30 @@ plan and `.superpowers/sdd/progress.md` for execution notes.
 - `unictx embed status <id>` (read-only status inspection)
 - True async ingest queue (goroutine + channel, return immediately)
 
+## Bugfix — OpenAI adapter string-error tolerance (2026-06-21)
+
+Plan 2b verification surfaced a real adapter bug: LMStudio (and likely
+other OpenAI-compat servers) sometimes return `200 OK` with the `error`
+field as a bare string — observed during model loading and transient
+internal errors. The adapter declared `embedResp.Error` as
+`*struct{Message, Type}`, so the response body failed to decode with
+`cannot unmarshal string into Go struct field embedResp.error`. The
+caller saw a confusing decode error instead of the server's actual
+message, and the row landed in `context_embedding` as `status='failed'`
+with useless error text.
+
+**What shipped** (commit `61d5b3c`, on `main` 2026-06-21):
+- `embedResp.Error` is now `json.RawMessage` — the overall response
+  decode succeeds regardless of the error field's shape (object or
+  string).
+- New `errorMessage()` helper extracts the human-readable message from
+  either canonical object form (`{"message":"..."}`) or bare string
+  (`"..."`).
+- Both the non-200 path and the 200-with-empty-data path surface the
+  extracted message. LMStudio's transient errors now reach the caller
+  (and `context_embedding.last_error`) with their original text.
+
+**Scope:** adapter-layer fix only. No schema change, no behavior change
+on the happy path. Verified with 3 new unit tests covering string-error
+on 200 OK, object-error on 200 OK, and string-error on non-200.
+
