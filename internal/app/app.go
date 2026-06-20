@@ -74,6 +74,16 @@ func Wire(cfg *config.Config) (*App, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("unsupported embedder provider: %s", cfg.Embedder.Provider)
 		}
+		// Ensure the model slug has a row in embedding_model so VectorStore
+		// can resolve it to a vec table. Plan 2a's seed only registers
+		// 'bge-m3'; this lets configs use any slug (e.g. LMStudio's
+		// 'text-embedding-bge-m3') at the same dimension (1024). Plan 2c
+		// replaces this with true per-model vec tables.
+		if err := sqlite.EnsureModelRegistered(db,
+			cfg.Embedder.Model, cfg.Embedder.Provider, cfg.Embedder.Dimension); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("register embedder model: %w", err)
+		}
 		vectorStore := sqlite.NewVectorStore(db)
 		embedSvc = service.NewEmbedService(embedder, vectorStore, repo)
 	}
