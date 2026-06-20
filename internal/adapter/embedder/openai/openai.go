@@ -62,12 +62,40 @@ type embedResp struct {
 		Embedding []float32 `json:"embedding"`
 		Index     int       `json:"index"`
 	} `json:"data"`
-	// Error mirrors OpenAI's error envelope: `{"error": {"message": ...}}`.
-	// We only read it on non-200 responses for diagnostic context.
-	Error *struct {
+	// Error is captured as json.RawMessage because OpenAI's spec defines
+	// the canonical envelope as `{"error": {"message": ..., "type": ...}}`,
+	// but real OpenAI-compat servers — notably LMStudio during model
+	// loading or transient internal errors — sometimes return `error` as
+	// a bare string. Holding the field raw lets the overall response
+	// decode succeed regardless of which shape the server used; the
+	// human-readable message is extracted on demand by errorMessage.
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+// errorMessage extracts a human-readable message from an OpenAI error
+// field, accepting either the canonical object form
+// ({"message": "...", "type": "..."}) or a bare string ("...").
+// Returns "" when the field is absent, null, or unparseable.
+func errorMessage(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var obj struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
-	} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.Message != "" {
+		return obj.Message
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return ""
 }
 
 func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -94,8 +122,8 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	if resp.StatusCode != http.StatusOK {
 		var r embedResp
 		_ = json.NewDecoder(resp.Body).Decode(&r)
-		if r.Error != nil && r.Error.Message != "" {
-			return nil, fmt.Errorf("openai-compat %d: %s", resp.StatusCode, r.Error.Message)
+		if msg := errorMessage(r.Error); msg != "" {
+			return nil, fmt.Errorf("openai-compat %d: %s", resp.StatusCode, msg)
 		}
 		return nil, fmt.Errorf("openai-compat returned %d", resp.StatusCode)
 	}
@@ -105,6 +133,9 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if len(r.Data) == 0 {
+		if msg := errorMessage(r.Error); msg != "" {
+			return nil, fmt.Errorf("openai-compat returned empty embeddings: %s", msg)
+		}
 		return nil, fmt.Errorf("openai-compat returned empty embeddings")
 	}
 	if len(r.Data) != len(texts) {

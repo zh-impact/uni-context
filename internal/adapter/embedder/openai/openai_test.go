@@ -121,6 +121,58 @@ func TestEmbedder_Unit_MismatchedCountIsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "1 embeddings")
 }
 
+func TestEmbedder_Unit_TolerantOfStringErrorOn200OK(t *testing.T) {
+	// Regression: LMStudio (and other OpenAI-compat servers) sometimes
+	// return 200 OK with `error` as a bare string — observed during
+	// model loading and transient internal errors. The adapter must
+	// surface the server's message rather than fail at JSON decode.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":"model text-embedding-bge-m3 is loading"}`))
+	}))
+	defer srv.Close()
+
+	e := New(srv.URL+"/v1", "bge-m3", 1024, "")
+	_, err := e.Embed(context.Background(), []string{"hi"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "decode response",
+		"must not fail at decode step when error field is a string")
+	assert.Contains(t, err.Error(), "model text-embedding-bge-m3 is loading",
+		"should surface LMStudio's actual error message")
+}
+
+func TestEmbedder_Unit_TolerantOfObjectErrorOn200OK(t *testing.T) {
+	// Symmetric case: canonical OpenAI object error shape on 200 OK.
+	// Confirms the fix does not regress tolerance for the object form.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	e := New(srv.URL+"/v1", "bge-m3", 1024, "")
+	_, err := e.Embed(context.Background(), []string{"hi"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "decode response")
+	assert.Contains(t, err.Error(), "rate limited")
+}
+
+func TestEmbedder_Unit_TolerantOfStringErrorOnNon200(t *testing.T) {
+	// Non-200 path must also tolerate string errors. Some servers return
+	// a bare string in the envelope even for 4xx/5xx responses.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"model is loading"}`))
+	}))
+	defer srv.Close()
+
+	e := New(srv.URL+"/v1", "bge-m3", 1024, "")
+	_, err := e.Embed(context.Background(), []string{"hi"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
+	assert.Contains(t, err.Error(), "model is loading")
+}
+
 func TestEmbedder_Unit_RespectsRequestContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done() // block until client cancels
