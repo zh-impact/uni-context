@@ -74,13 +74,15 @@ Plan 2b implementer can find them without grepping.
    FileStore, only the title contributes to the vector
    (`internal/service/ingest.go` `contentForEmbed`). Large items become
    effectively title-only embeddings. **Plan 2b fix:** hydrate from
-   FileStore (`port.FileStore.Get`) before embedding.
+   FileStore (`port.FileStore.Get`) before embedding. **Status: closed
+   in Plan 2b** — see EmbedService hydration below.
 
 2. **`context_embedding` status rows are NOT written in 2a.** The
    schema has the table (migration 0002), but no code populates it —
    the presence of a `vec_<model>` row IS the embedded signal, and
    `context_item.any_embedding` is the coarse signal. **Plan 2b fix:**
-   write status rows for retry tracking.
+   write status rows for retry tracking. **Status: closed in Plan 2b**
+   — see port.EmbeddingRepo below.
 
 3. **The hybrid e2e test is doubly gated** and is NOT exercised by any
    default `make` target. The RRF fusion path is unit-tested at the
@@ -91,7 +93,11 @@ Plan 2b implementer can find them without grepping.
 
 4. **Embedding is synchronous.** Ingest waits up to ~60s for Ollama on
    every Create when the embedder is enabled. **Plan 2b fix:** async
-   queue.
+   queue. **Status: still synchronous in 2b** — async was descoped; 2b
+   added retry tracking (worker) and bulk catch-up (backfill), but the
+   ingest path still embeds inline. Ingest does not block on retry — a
+   failed embed writes a `status='failed'` row that the worker picks up
+   later. See Plan 2b Known Limitations.
 
 5. **Only one embedding model.** The schema supports multi-model
    (`embedding_model` table with `vec_<model>` tables per row), but
@@ -110,7 +116,8 @@ Plan 2b implementer can find them without grepping.
 
 7. **No backfill.** Plan 1 items created before enabling
    `embedder.enabled=true` will not be embedded. **Plan 2b fix:**
-   `unictx embed backfill` command.
+   `unictx embed backfill` command. **Status: closed in Plan 2b** —
+   see `unictx embed backfill` below.
 
 ### Deferred to Plan 2b/c/d
 
@@ -128,3 +135,90 @@ after 2a:
   The core `openai` adapter shipped as a Plan 2d preview — see Plan 2a
   section above. → **Plan 2d**
 - `--mode vector-only` → trivial follow-up, skipped in 2a
+
+## Plan 2b — Async Embed Queue + Backfill (2026-06-21)
+
+Closes four Plan 2a gaps: FileStore content hydration,
+`context_embedding` status rows, `unictx embed backfill`, and
+`unictx embed worker` (the retry loop that 2a's "async queue"
+limitation gestured at). See
+`docs/superpowers/plans/2026-06-21-plan-2b-async-backfill.md` for the
+plan and `.superpowers/sdd/progress.md` for execution notes.
+
+**What shipped:**
+- **Migration 0003:** `context_embedding` gains `attempts` (INTEGER NOT
+  NULL DEFAULT 0) and `last_error` (TEXT). Additive ALTER only — no
+  rewrite of 0002. The original `error` column from 0002 is kept for
+  backward-compat; `last_error` is what the worker updates on each
+  failed retry.
+- **`port.EmbeddingRepo`:** new single-responsibility port
+  (`UpsertStatus` / `GetStatus` / `ListFailed`) separate from
+  `ContextRepo`. The boundary matches the access pattern: ContextRepo
+  owns item rows; EmbeddingRepo owns status rows. The sqlite adapter
+  lives in `internal/adapter/sqlite/embedding_repo.go`.
+- **`EmbedService` constructor change:** gained `port.FileStore` +
+  `port.EmbeddingRepo` deps. `NewEmbedService(embedder, vs, repo, fs,
+  embRepo)` — the two new trailing args close the Plan 2a "externalized
+  items embed title-only" gap by hydrating content from FileStore
+  before embedding (`hydrateContent` in
+  `internal/service/embed.go`), and writes a status row on every
+  attempt via `recordStatus` (`done` on success, `failed` with error
+  text on failure).
+- **`unictx embed backfill [--limit N] [--dry-run]`:** bulk-embeds
+  items where `any_embedding=0`. Idempotent (the `AnyEmbedding=0`
+  filter excludes items already embedded). Failures are recorded as
+  status rows but do not abort the run — the summary at the end lists
+  per-item failures.
+- **`unictx embed worker [--interval 30s]`:** long-running retry loop
+  for `status='failed'` rows. Polls `EmbeddingRepo.ListFailed` at the
+  configured interval, retries each via `EmbedService.Embed` (which
+  writes the new status row), and exits cleanly on SIGINT/SIGTERM via
+  the shared `signalContext` helper.
+- **`port.ItemFilter.AnyEmbedding`:** new `*int` field for backfill's
+  "unembedded only" query. Default `nil` = no filter — Plan 1/2a
+  callers pass `nil` and see no behavior change. Backfill sets it to
+  `pointerTo(0)` to mean "any_embedding=0 only".
+
+### Known Limitations (Plan 2b)
+
+1. **Worker has no max-attempts cap.** A row stays `status='failed'`
+   until it succeeds or the user manually `DELETE`s the row. Rationale:
+   YAGNI; user controls worker lifetime via Ctrl+C. Plan 2e (if ever)
+   could add `status='exhausted'` after N attempts.
+
+2. **No exponential backoff.** Worker polls at a fixed interval
+   (default 30s). Same YAGNI rationale as above — a stuck row just
+   retries every 30s until the user kills the worker.
+
+3. **Backfill + worker send one embed request per item.** No batched
+   embeddings API call (OpenAI supports 1 request, N inputs). Plan 2d
+   polish. Per-item error isolation is the trade-off.
+
+4. **No `unictx embed status <id>` command.** Read-only inspection of
+   `context_embedding` rows. Trivial follow-up; deferred to avoid scope
+   creep. Use `sqlite3 unictx.db "SELECT * FROM context_embedding"` in
+   the meantime.
+
+5. **`EmbedService` constructor signature is a breaking change.** Plan
+   2a had two callers (`app.Wire` + tests); both updated in this patch
+   series. Any out-of-tree consumers (none known) would need the same
+   update — add `port.FileStore` and `port.EmbeddingRepo` as the
+   trailing two args.
+
+6. **Ingest is still synchronous.** The 2a "async queue" limitation
+   (#4 in 2a's list above) was only partially closed by 2b: 2b added
+   retry tracking (worker) and catch-up (backfill), but the ingest path
+   itself still blocks on the embed attempt before returning. The
+   failure mode is graceful (status row written, item still
+   FTS-searchable), but latency on embedder-enabled ingests is
+   unchanged from 2a. A real async queue (goroutine + channel) is
+   Plan 2e territory.
+
+### Deferred to Plan 2c+
+
+- Multi-model parallel embedding + per-model vec tables
+- Re-embedding when switching models
+- Provider auto-detection / encoding formats (OpenAI-compat polish)
+- `unictx embed status <id>` (read-only status inspection)
+- True async ingest queue (goroutine + channel, return immediately)
+

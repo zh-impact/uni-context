@@ -150,6 +150,13 @@ func (r *ContextRepo) List(ctx context.Context, f port.ItemFilter) ([]domain.Con
 			args = append(args, t)
 		}
 	}
+	if f.AnyEmbedding != nil {
+		// Pointer semantics: nil = no filter (default for Plan 1/2a callers);
+		// *0 = unembedded only; *1 = embedded only. Backfill passes *0 so
+		// already-embedded items never enter the iteration.
+		where = append(where, "any_embedding = ?")
+		args = append(args, *f.AnyEmbedding)
+	}
 	if f.Cursor != "" {
 		ts, id, err := decodeCursor(f.Cursor)
 		if err != nil {

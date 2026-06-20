@@ -3,68 +3,148 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"uni-context/internal/port"
 )
 
-// EmbedService writes embeddings for items. Plan 2a: synchronous, single
-// model (the embedder's Model().Slug). Plan 2b adds async queue + worker.
+// EmbedService writes embeddings for items.
 //
-// Plan 2a does NOT write context_embedding status rows; the vec_<model>
-// table presence IS the embedded signal. Plan 2b will add the status row
-// (with status='done'/'failed' and error text) for retry tracking. The
-// any_embedding=1 flag on context_item is the per-item "searchable by
-// vector" indicator that SearchService checks.
+// Plan 2b changes vs Plan 2a:
+//   - Hydrates content from FileStore when the caller passes empty content
+//     and the item has a ContentURI (fixes the Plan 2a gap where items
+//     with externalized content embedded title-only).
+//   - Writes a context_embedding status row on every attempt (done/failed)
+//     via EmbeddingRepo, so the worker can find retries and operators get
+//     observability.
+//
+// Plan 2b does NOT add: async queue (sync ingest stays; worker cmd handles
+// retries), max-attempts cap, multi-model parallel embed.
 type EmbedService struct {
 	embedder port.Embedder
 	vs       port.VectorStore
 	repo     port.ContextRepo
+	fs       port.FileStore
+	embRepo  port.EmbeddingRepo
 }
 
-func NewEmbedService(embedder port.Embedder, vs port.VectorStore, repo port.ContextRepo) *EmbedService {
-	return &EmbedService{embedder: embedder, vs: vs, repo: repo}
+// NewEmbedService wires the embedder, vector store, context repo,
+// filestore (for content hydration), and embedding status repo.
+func NewEmbedService(
+	embedder port.Embedder,
+	vs port.VectorStore,
+	repo port.ContextRepo,
+	fs port.FileStore,
+	embRepo port.EmbeddingRepo,
+) *EmbedService {
+	return &EmbedService{
+		embedder: embedder, vs: vs, repo: repo, fs: fs, embRepo: embRepo,
+	}
 }
 
-// Embed computes and stores an embedding for itemID. The title and
-// content are passed in (rather than re-fetched) so callers can compose
-// the embed text however they like. Embed composes them as
-// "title\n\ncontent". Errors from the embedder are returned; the caller
-// decides whether to tolerate them (IngestService does) or fail.
+// Embed computes and stores an embedding for itemID.
+//
+// When content=="" and the item has ContentURI set (externalized case),
+// Embed hydrates content from FileStore. Callers may pass content directly
+// to skip the hydration round-trip (the backfill path may already have it).
 //
 // Side effects:
 //   - vec_<model> row written (or replaced) for itemID
-//   - context_item.any_embedding set to 1 via repo.Update
+//   - context_item.any_embedding set to 1 via repo.Update (on success only)
+//   - context_embedding status row written via embRepo.UpsertStatus
 //
-// Plan 2a limitation: no context_embedding status row is written (see
-// the type doc). The vec_<model> row's presence is the embedded signal.
+// Status row is written on EVERY attempt. On success: status='done',
+// errStr="". On any failure: status='failed', errStr=err.Error().
+// Status-row write failure is logged to stderr but does NOT mask the
+// original embed error or success.
 func (s *EmbedService) Embed(ctx context.Context, itemID, title, content string) error {
 	model := s.embedder.Model().Slug
-	text := strings.TrimSpace(title + "\n\n" + content)
+
+	// Hydrate if the caller didn't supply content. This is the path
+	// IngestService.Create takes for externalized items (item.Content was
+	// cleared after fs.Put). Backfill may pre-hydrate and pass content.
+	hydratedContent := content
+	if hydratedContent == "" {
+		hc, err := s.hydrateContent(ctx, itemID)
+		if err != nil {
+			// Hydration failure is recoverable by the worker later; record status.
+			s.recordStatus(ctx, itemID, model, "failed", err.Error())
+			return fmt.Errorf("hydrate content for %s: %w", itemID, err)
+		}
+		hydratedContent = hc
+	}
+
+	text := strings.TrimSpace(title + "\n\n" + hydratedContent)
 	if text == "" {
-		return fmt.Errorf("embed: empty text for item %s", itemID)
+		err := fmt.Errorf("embed: empty text for item %s", itemID)
+		s.recordStatus(ctx, itemID, model, "failed", err.Error())
+		return err
 	}
 
 	vecs, err := s.embedder.Embed(ctx, []string{text})
 	if err != nil {
+		s.recordStatus(ctx, itemID, model, "failed", err.Error())
 		return fmt.Errorf("embed item %s: %w", itemID, err)
 	}
 	if len(vecs) != 1 {
-		return fmt.Errorf("embedder returned %d vectors, expected 1", len(vecs))
+		err := fmt.Errorf("embedder returned %d vectors, expected 1", len(vecs))
+		s.recordStatus(ctx, itemID, model, "failed", err.Error())
+		return err
 	}
 
 	if err := s.vs.Put(ctx, model, itemID, vecs[0]); err != nil {
+		s.recordStatus(ctx, itemID, model, "failed", err.Error())
 		return fmt.Errorf("store vector for %s: %w", itemID, err)
 	}
 
 	// Flip any_embedding=1 so SearchService knows this item is vector-searchable.
 	item, err := s.repo.Get(ctx, itemID)
 	if err != nil {
+		// Vec row already written; do NOT fail the whole embed over the flag.
+		// Record status as done — the vec row IS the source of truth for
+		// "embedded"; the any_embedding flag is a perf optimization, not
+		// correctness. Surface the error so the caller knows the flag wasn't set.
+		s.recordStatus(ctx, itemID, model, "done", "")
 		return fmt.Errorf("load item for flag update: %w", err)
 	}
 	item.AnyEmbedding = 1
 	if err := s.repo.Update(ctx, item); err != nil {
+		s.recordStatus(ctx, itemID, model, "done", "")
 		return fmt.Errorf("mark any_embedding: %w", err)
 	}
+
+	s.recordStatus(ctx, itemID, model, "done", "")
 	return nil
+}
+
+// hydrateContent returns the item's inline Content if set, or fetches it
+// from FileStore via ContentURI. Returns empty string if neither is set
+// (which Embed treats as title-only — caller's responsibility to decide
+// if that's acceptable).
+func (s *EmbedService) hydrateContent(ctx context.Context, itemID string) (string, error) {
+	item, err := s.repo.Get(ctx, itemID)
+	if err != nil {
+		return "", err
+	}
+	if item.Content != "" {
+		return item.Content, nil
+	}
+	if item.ContentURI == "" {
+		return "", nil // neither inline nor externalized; title-only embed
+	}
+	bytes, err := s.fs.Get(item.ContentURI)
+	if err != nil {
+		return "", fmt.Errorf("fs.Get %s: %w", item.ContentURI, err)
+	}
+	return string(bytes), nil
+}
+
+// recordStatus wraps embRepo.UpsertStatus with stderr logging on failure.
+// Status-row write failure must never mask the original embed result.
+func (s *EmbedService) recordStatus(ctx context.Context, itemID, model, status, errStr string) {
+	if err := s.embRepo.UpsertStatus(ctx, itemID, model, status, errStr); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warn: failed to record embedding status for %s: %v\n", itemID, err)
+	}
 }

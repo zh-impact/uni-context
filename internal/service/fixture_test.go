@@ -48,6 +48,15 @@ func newMemFileStore(t *testing.T) port.FileStore {
 	return fs
 }
 
+// newMemEmbeddingRepo returns a SQLite-backed EmbeddingRepo sharing the
+// same *sql.DB as the caller's repo. The shared-DB requirement is load
+// bearing: EmbedService writes status rows that tests then read back via
+// the same handle. A separate :memory: database would be invisible.
+func newMemEmbeddingRepo(t *testing.T, db *sql.DB) port.EmbeddingRepo {
+	t.Helper()
+	return sqlite.NewEmbeddingRepo(db)
+}
+
 // newMemVectorStore opens an in-memory SQLite DB, runs migrations
 // (registers vec0 via the sqlite package init), and registers a
 // "fake-model" row (8-dim) so the service-layer tests can use

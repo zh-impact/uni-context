@@ -144,7 +144,7 @@ func TestIngest_Create_TriggersEmbed_WhenConfigured(t *testing.T) {
 	vs, repo, db := newMemVectorStore(t)
 	defer db.Close()
 	emb := fake.New("fake-model", 8)
-	embedSvc := NewEmbedService(emb, vs, repo)
+	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db))
 	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
 
 	ctx := context.Background()
@@ -178,7 +178,7 @@ func TestIngest_Create_SucceedsWhenEmbedFails(t *testing.T) {
 	vs, repo, db := newMemVectorStore(t)
 	defer db.Close()
 	emb := &failingEmbedder{}
-	embedSvc := NewEmbedService(emb, vs, repo)
+	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db))
 	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
 
 	id, err := svc.Create(context.Background(), Input{

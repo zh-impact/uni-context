@@ -15,6 +15,10 @@ import (
 type Embedder struct {
 	slug      string
 	dimension int
+	// embedHook, when non-nil, overrides Embed. Tests use it to capture
+	// inputs, inject errors, or return canned vectors. nil = default
+	// deterministic behavior (vectorFor via sha256).
+	embedHook func(texts []string) ([][]float32, error)
 }
 
 func New(slug string, dimension int) *Embedder {
@@ -25,7 +29,18 @@ func (e *Embedder) Model() port.ModelInfo {
 	return port.ModelInfo{Slug: e.slug, Dimension: e.dimension}
 }
 
+// SetEmbedHook lets tests override Embed behavior: capture inputs, inject
+// errors, return canned vectors. Pass nil to reset to default behavior.
+// Default behavior (hook nil) is unchanged so existing tests keep their
+// deterministic sha256-derived vectors.
+func (e *Embedder) SetEmbedHook(fn func([]string) ([][]float32, error)) {
+	e.embedHook = fn
+}
+
 func (e *Embedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	if e.embedHook != nil {
+		return e.embedHook(texts)
+	}
 	out := make([][]float32, len(texts))
 	for i, text := range texts {
 		out[i] = e.vectorFor(text)

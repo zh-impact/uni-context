@@ -99,22 +99,15 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 	// FTS-searchable. Warn to stderr; future Plan 2b async queue will
 	// retry. any_embedding stays 0, which SearchService treats as
 	// "not vector-searchable" (correct).
+	//
+	// Plan 2b: pass item.Content directly. For externalized items this is
+	// "" and EmbedService hydrates from FileStore via item.ContentURI.
 	if s.embed != nil {
-		if err := s.embed.Embed(ctx, item.ID, item.Title, contentForEmbed(item)); err != nil {
+		if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: embed failed for %s: %v\n", item.ID, err)
 		}
 	}
 	return item.ID, nil
-}
-
-// contentForEmbed returns the text fed to the embedder. Plan 2a uses
-// inline Content only. LIMITATION: items whose content was externalized
-// to FileStore (Content == "", ContentURI != "") embed with EMPTY
-// content — only the title contributes to the vector. Plan 2b hydrates
-// from FileStore before embedding to fix this; for now, large items are
-// effectively title-only embeddings.
-func contentForEmbed(item domain.ContextItem) string {
-	return item.Content
 }
 
 func countWords(s string) int {
