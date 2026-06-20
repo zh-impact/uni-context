@@ -15,6 +15,13 @@ type ItemFilter struct {
 	ProjectID   string
 	Cursor      string // opaque; created_at + id encoded
 	Limit       int
+
+	// AnyEmbedding filters by context_item.any_embedding. Pointer-style
+	// so the zero value (nil) means "no filter" — existing callers from
+	// Plan 1/2a are unchanged. When non-nil:
+	//   *0 = only items NOT yet embedded
+	//   *1 = only items already embedded
+	AnyEmbedding *int
 }
 
 // ContextRepo is the persistence port for ContextItem.

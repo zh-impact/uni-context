@@ -32,13 +32,11 @@ type App struct {
 	// Embedder is constructed. Plan 2b: status rows for async backfill.
 	EmbeddingRepo port.EmbeddingRepo
 
-	// Backfill and Worker are populated by Tasks 5 and 6 (Plan 2b).
-	// They stay nil here so Wire returns cleanly in Plan 1 / Plan 2a mode.
-	// Typed as any because the concrete *service.BackfillService and
-	// *service.WorkerService types do not exist yet; Tasks 5/6 will
-	// replace these with their concrete pointer types.
-	Backfill any // *service.BackfillService — Task 5
-	Worker   any // *service.WorkerService   — Task 6
+	// Backfill is populated when the embedder is enabled; nil otherwise
+	// (Plan 1 / Plan 2a mode). Plan 2b Task 5: drives 'embed backfill'.
+	// Worker (Task 6) stays any until that task tightens it.
+	Backfill *service.BackfillService
+	Worker   any // *service.WorkerService — Task 6
 
 	Ingest *service.IngestService
 	Search *service.SearchService
@@ -77,6 +75,9 @@ func Wire(cfg *config.Config) (*App, error) {
 	// embeddingRepo is nil unless embedder is enabled. Declared at function
 	// scope so the return struct can reference it without conditional returns.
 	var embeddingRepo port.EmbeddingRepo
+	// backfill is nil unless embedder is enabled. Plan 2b Task 5: bulk-embed
+	// items where any_embedding=0 via the new 'embed backfill' CLI command.
+	var backfill *service.BackfillService
 	if cfg.Embedder.Enabled {
 		switch cfg.Embedder.Provider {
 		case "ollama":
@@ -105,6 +106,9 @@ func Wire(cfg *config.Config) (*App, error) {
 		// in one DB. Exposed on App so the worker (Task 6) can reach it.
 		embeddingRepo = sqlite.NewEmbeddingRepo(db)
 		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embeddingRepo)
+		// Plan 2b Task 5: BackfillService shares repo + embedSvc so the
+		// 'embed backfill' CLI can iterate unembedded items and embed each.
+		backfill = service.NewBackfillService(repo, embedSvc)
 	}
 
 	ingest := service.NewIngestService(repo, fs)
@@ -126,7 +130,8 @@ func Wire(cfg *config.Config) (*App, error) {
 		FS:            fs,
 		Embedder:      embedder,
 		EmbeddingRepo: embeddingRepo,
-		// Backfill and Worker stay nil here; Tasks 5 and 6 populate them.
+		Backfill:      backfill,
+		// Worker stays nil until Task 6 populates it.
 		Ingest: ingest,
 		Search: search,
 	}, nil
