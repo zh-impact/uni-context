@@ -28,6 +28,18 @@ type App struct {
 	// the app runs in Plan 1 mode (no vector indexing, search is fts-only).
 	Embedder port.Embedder
 
+	// EmbeddingRepo owns the context_embedding rows; non-nil only when
+	// Embedder is constructed. Plan 2b: status rows for async backfill.
+	EmbeddingRepo port.EmbeddingRepo
+
+	// Backfill and Worker are populated by Tasks 5 and 6 (Plan 2b).
+	// They stay nil here so Wire returns cleanly in Plan 1 / Plan 2a mode.
+	// Typed as any because the concrete *service.BackfillService and
+	// *service.WorkerService types do not exist yet; Tasks 5/6 will
+	// replace these with their concrete pointer types.
+	Backfill any // *service.BackfillService — Task 5
+	Worker   any // *service.WorkerService   — Task 6
+
 	Ingest *service.IngestService
 	Search *service.SearchService
 }
@@ -62,6 +74,9 @@ func Wire(cfg *config.Config) (*App, error) {
 	// Only constructed when the user explicitly opts in via embedder.enabled.
 	var embedder port.Embedder
 	var embedSvc *service.EmbedService
+	// embeddingRepo is nil unless embedder is enabled. Declared at function
+	// scope so the return struct can reference it without conditional returns.
+	var embeddingRepo port.EmbeddingRepo
 	if cfg.Embedder.Enabled {
 		switch cfg.Embedder.Provider {
 		case "ollama":
@@ -85,11 +100,11 @@ func Wire(cfg *config.Config) (*App, error) {
 			return nil, fmt.Errorf("register embedder model: %w", err)
 		}
 		vectorStore := sqlite.NewVectorStore(db)
-		// Plan 2b: EmbedService needs fs (hydration) + embRepo (status rows).
-		// fs is constructed above; embRepo shares the same db so status rows
-		// and items live in one DB. Task 4 may refactor this further.
-		embRepo := sqlite.NewEmbeddingRepo(db)
-		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embRepo)
+		// Plan 2b: EmbedService needs fs (hydration) + embeddingRepo (status rows).
+		// embeddingRepo shares the same db so status rows and items live
+		// in one DB. Exposed on App so the worker (Task 6) can reach it.
+		embeddingRepo = sqlite.NewEmbeddingRepo(db)
+		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embeddingRepo)
 	}
 
 	ingest := service.NewIngestService(repo, fs)
@@ -103,15 +118,17 @@ func Wire(cfg *config.Config) (*App, error) {
 	}
 
 	return &App{
-		Config:   cfg,
-		DB:       db,
-		Repo:     repo,
-		Project:  proj,
-		Searcher: searcher,
-		FS:       fs,
-		Embedder: embedder,
-		Ingest:   ingest,
-		Search:   search,
+		Config:        cfg,
+		DB:            db,
+		Repo:          repo,
+		Project:       proj,
+		Searcher:      searcher,
+		FS:            fs,
+		Embedder:      embedder,
+		EmbeddingRepo: embeddingRepo,
+		// Backfill and Worker stay nil here; Tasks 5 and 6 populate them.
+		Ingest: ingest,
+		Search: search,
 	}, nil
 }
 
