@@ -85,7 +85,11 @@ func Wire(cfg *config.Config) (*App, error) {
 			return nil, fmt.Errorf("register embedder model: %w", err)
 		}
 		vectorStore := sqlite.NewVectorStore(db)
-		embedSvc = service.NewEmbedService(embedder, vectorStore, repo)
+		// Plan 2b: EmbedService needs fs (hydration) + embRepo (status rows).
+		// fs is constructed above; embRepo shares the same db so status rows
+		// and items live in one DB. Task 4 may refactor this further.
+		embRepo := sqlite.NewEmbeddingRepo(db)
+		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embRepo)
 	}
 
 	ingest := service.NewIngestService(repo, fs)
