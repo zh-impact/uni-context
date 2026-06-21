@@ -240,3 +240,10 @@ func (f *fakeEmbedRepo) GetStatus(ctx context.Context, itemID, modelSlug string)
 func (f *fakeEmbedRepo) ListFailed(ctx context.Context, limit int) ([]port.EmbeddingStatus, error) {
 	return nil, nil
 }
+
+// ListForItem satisfies the Plan 2c follow-up port.EmbeddingRepo addition.
+// Not exercised by reembed tests; returns empty slice (not nil) to match
+// the production contract.
+func (f *fakeEmbedRepo) ListForItem(ctx context.Context, itemID string) ([]port.EmbeddingStatus, error) {
+	return []port.EmbeddingStatus{}, nil
+}

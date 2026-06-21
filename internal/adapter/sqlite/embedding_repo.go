@@ -112,3 +112,41 @@ func (r *EmbeddingRepo) ListFailed(ctx context.Context, limit int) ([]port.Embed
 	}
 	return out, rows.Err()
 }
+
+const listForItemSQL = `
+SELECT item_id, model_slug, status, error, last_error, attempts, embedded_at
+FROM context_embedding
+WHERE item_id = ?
+ORDER BY model_slug ASC
+`
+
+// ListForItem returns all status rows for the given item, ordered by
+// model_slug ASC. Empty slice (not nil) if no rows — callers depend on
+// `len(rows) == 0` without nil-checking. Used by `embed status <id>`.
+func (r *EmbeddingRepo) ListForItem(ctx context.Context, itemID string) ([]port.EmbeddingStatus, error) {
+	rows, err := r.db.QueryContext(ctx, listForItemSQL, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("list status for item %s: %w", itemID, err)
+	}
+	defer rows.Close()
+
+	out := []port.EmbeddingStatus{}
+	for rows.Next() {
+		var (
+			s          port.EmbeddingStatus
+			err1       sql.NullString
+			lastErr    sql.NullString
+			embeddedAt int64
+		)
+		if err := rows.Scan(
+			&s.ItemID, &s.ModelSlug, &s.Status, &err1, &lastErr,
+			&s.Attempts, &embeddedAt); err != nil {
+			return nil, fmt.Errorf("scan status row: %w", err)
+		}
+		s.Error = err1.String
+		s.LastError = lastErr.String
+		s.EmbeddedAt = time.Unix(embeddedAt, 0).UTC()
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

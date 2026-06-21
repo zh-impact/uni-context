@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -12,12 +13,12 @@ import (
 	"uni-context/internal/port"
 )
 
-func newEmbeddingRepoFixture(t *testing.T) (port.EmbeddingRepo, *ContextRepo) {
+func newEmbeddingRepoFixture(t *testing.T) (port.EmbeddingRepo, *ContextRepo, *sql.DB) {
 	t.Helper()
 	db := openTestDB(t) // from model_registry_test.go — fresh migrated :memory:
 	repo := NewContextRepo(db)
 	embRepo := NewEmbeddingRepo(db)
-	return embRepo, repo
+	return embRepo, repo, db
 }
 
 // insertItemForEmbedTest creates a context_item so FK on context_embedding passes.
@@ -31,7 +32,7 @@ func insertItemForEmbedTest(t *testing.T, repo *ContextRepo, id string) {
 }
 
 func TestEmbeddingRepo_UpsertStatus_InsertsFresh(t *testing.T) {
-	embRepo, repo := newEmbeddingRepoFixture(t)
+	embRepo, repo, _ := newEmbeddingRepoFixture(t)
 	insertItemForEmbedTest(t, repo, "item-1")
 
 	require.NoError(t, embRepo.UpsertStatus(context.Background(),
@@ -46,7 +47,7 @@ func TestEmbeddingRepo_UpsertStatus_InsertsFresh(t *testing.T) {
 }
 
 func TestEmbeddingRepo_UpsertStatus_OnConflictIncrementsAttempts(t *testing.T) {
-	embRepo, repo := newEmbeddingRepoFixture(t)
+	embRepo, repo, _ := newEmbeddingRepoFixture(t)
 	insertItemForEmbedTest(t, repo, "item-2")
 
 	// First attempt fails
@@ -73,7 +74,7 @@ func TestEmbeddingRepo_UpsertStatus_OnConflictIncrementsAttempts(t *testing.T) {
 }
 
 func TestEmbeddingRepo_GetStatus_NotFound(t *testing.T) {
-	embRepo, _ := newEmbeddingRepoFixture(t)
+	embRepo, _, _ := newEmbeddingRepoFixture(t)
 	_, err := embRepo.GetStatus(context.Background(), "nonexistent", "bge-m3")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrNotFound)
@@ -81,7 +82,7 @@ func TestEmbeddingRepo_GetStatus_NotFound(t *testing.T) {
 
 func TestEmbeddingRepo_ListFailed_BasicOrdering(t *testing.T) {
 	// Replacement test using sleeps to guarantee ordering (no raw SQL needed).
-	embRepo, repo := newEmbeddingRepoFixture(t)
+	embRepo, repo, _ := newEmbeddingRepoFixture(t)
 	insertItemForEmbedTest(t, repo, "first")
 	require.NoError(t, embRepo.UpsertStatus(context.Background(),
 		"first", "bge-m3", "failed", "err1"))
@@ -107,4 +108,67 @@ func TestEmbeddingRepo_ListFailed_BasicOrdering(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, one, 1)
 	assert.Equal(t, "first", one[0].ItemID)
+}
+
+// TestEmbeddingRepo_ListForItem covers the four behaviors the CLI command
+// depends on: empty slice (not nil) for missing IDs, single row, multi-
+// model ordering by model_slug ASC, and columns scanning correctly.
+func TestEmbeddingRepo_ListForItem(t *testing.T) {
+	t.Run("missing item returns empty slice not nil", func(t *testing.T) {
+		embRepo, _, _ := newEmbeddingRepoFixture(t)
+		rows, err := embRepo.ListForItem(context.Background(), "no-such-item")
+		require.NoError(t, err)
+		require.NotNil(t, rows, "empty slice, not nil — caller uses len()")
+		assert.Len(t, rows, 0)
+	})
+
+	t.Run("single row returns expected columns", func(t *testing.T) {
+		embRepo, repo, _ := newEmbeddingRepoFixture(t)
+		insertItemForEmbedTest(t, repo, "i1")
+		require.NoError(t, embRepo.UpsertStatus(context.Background(),
+			"i1", "bge-m3", "done", ""))
+
+		rows, err := embRepo.ListForItem(context.Background(), "i1")
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		assert.Equal(t, "i1", rows[0].ItemID)
+		assert.Equal(t, "bge-m3", rows[0].ModelSlug)
+		assert.Equal(t, "done", rows[0].Status)
+	})
+
+	t.Run("multiple models ordered by slug ASC", func(t *testing.T) {
+		embRepo, repo, db := newEmbeddingRepoFixture(t)
+		insertItemForEmbedTest(t, repo, "i2")
+
+		// The migration 0002 FK requires embedding_model rows for these
+		// slugs (UpsertStatus would otherwise fail FK). Direct INSERT
+		// keeps the test focused on ListForItem rather than spinning up
+		// per-slug vec tables via Registry.Register. Insert parent rows
+		// BEFORE child context_embedding rows so FK passes.
+		for _, slug := range []string{"zzz-model", "aaa-model", "mmm-model"} {
+			_, err := db.Exec(`
+				INSERT OR IGNORE INTO embedding_model
+				(slug, name, provider, dimension, vec_table, is_default, status, config, created_at)
+				VALUES (?, ?, 'ollama', 8, 'vec_unused_8', 0, 'active', '{}', 0)`,
+				slug, slug)
+			require.NoError(t, err)
+		}
+
+		// Insert in non-alphabetical order; assert sorted output.
+		require.NoError(t, embRepo.UpsertStatus(context.Background(),
+			"i2", "zzz-model", "done", ""))
+		require.NoError(t, embRepo.UpsertStatus(context.Background(),
+			"i2", "aaa-model", "failed", "boom"))
+		require.NoError(t, embRepo.UpsertStatus(context.Background(),
+			"i2", "mmm-model", "done", ""))
+
+		rows, err := embRepo.ListForItem(context.Background(), "i2")
+		require.NoError(t, err)
+		require.Len(t, rows, 3)
+		assert.Equal(t, "aaa-model", rows[0].ModelSlug)
+		assert.Equal(t, "mmm-model", rows[1].ModelSlug)
+		assert.Equal(t, "zzz-model", rows[2].ModelSlug)
+		assert.Equal(t, "failed", rows[0].Status)
+		assert.Equal(t, "boom", rows[0].LastError)
+	})
 }

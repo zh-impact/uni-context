@@ -34,4 +34,11 @@ type EmbeddingRepo interface {
 	// by embedded_at ASC (oldest failures first — they've waited longest).
 	// limit<=0 defaults to 100.
 	ListFailed(ctx context.Context, limit int) ([]EmbeddingStatus, error)
+
+	// ListForItem returns all status rows for the given item, ordered by
+	// model_slug ASC. Empty slice (not nil) if no rows — callers depend
+	// on `len(rows) == 0` without nil-checking. Used by the
+	// `embed status <id>` CLI to show per-model migration state.
+	// Plan 2c follow-up addition.
+	ListForItem(ctx context.Context, itemID string) ([]EmbeddingStatus, error)
 }

@@ -18,7 +18,7 @@ func TestEmbedCmd_HasExpectedSubcommands(t *testing.T) {
 	for _, c := range subs {
 		names = append(names, c.Use)
 	}
-	for _, want := range []string{"backfill", "worker", "model", "switch", "reembed"} {
+	for _, want := range []string{"backfill", "worker", "model", "switch", "reembed", "status"} {
 		assert.Contains(t, names, want, "embed must expose %q subcommand", want)
 	}
 }
