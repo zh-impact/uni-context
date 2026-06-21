@@ -50,10 +50,16 @@ Standard SQLite rebuild dance (SQLite does not support `ALTER TABLE ... ADD FORE
 ```sql
 -- Plan 2c follow-up: harden context_embedding.model_slug FK to ON DELETE CASCADE.
 -- SQLite does not support ALTER TABLE ADD FOREIGN KEY; standard rebuild dance.
-
-PRAGMA foreign_keys = OFF;
-
-BEGIN;
+--
+-- Note: the migrations runner (migrations.go execMigration) wraps each
+-- file's body in a single tx via BeginTx/Commit, so this file MUST NOT
+-- contain its own BEGIN/COMMIT (SQLite rejects nested BEGIN). PRAGMA
+-- foreign_keys is a no-op inside a tx (SQLite docs), so it is omitted.
+-- The rebuild is safe without disabling FKs because no other table
+-- REFERENCES context_embedding — it only holds FKs TO context_item and
+-- embedding_model, which remain stable across the rebuild. The DROP of
+-- the old context_embedding doesn't violate any FK (nothing references
+-- it); the RENAME installs the new table in place.
 
 CREATE TABLE context_embedding_new (
     item_id     TEXT NOT NULL REFERENCES context_item(id) ON DELETE CASCADE,
@@ -75,12 +81,10 @@ ALTER TABLE context_embedding_new RENAME TO context_embedding;
 
 CREATE INDEX IF NOT EXISTS idx_emb_model ON context_embedding(model_slug);
 
-COMMIT;
-
-PRAGMA foreign_keys = ON;
+UPDATE schema_meta SET value = '4' WHERE key = 'schema_version';
 ```
 
-The migration is idempotent in the sense that re-running it on an already-migrated DB drops and recreates the table — but the `migrations.go` runner gates each migration file by `schema_version`, so it runs exactly once per DB. No `IF NOT EXISTS` on the table name (would mask a half-applied previous run).
+The `migrations.go` runner gates each migration file by `schema_version`, so it runs exactly once per DB. No `IF NOT EXISTS` on the table name (would mask a half-applied previous run). The trailing `UPDATE schema_meta` follows the 0001/0003 pattern (the runner does not auto-bump the version).
 
 ### 2. `internal/port/embeddingrepo.go` — new method on `EmbeddingRepo`
 
@@ -326,7 +330,7 @@ Two concurrent Register("X") calls
 | scanModel with non-empty non-JSON | Returns descriptor + ErrCorruptConfig; reconcile heals |
 | Race Register (PK violation) | Loser sees "model X already registered: ..." (chained original) |
 | List with tied created_at | Stable order via `, slug ASC` tiebreaker |
-| Failed DB write mid-0004 migration | tx rolls back; PRAGMA foreign_keys restored to ON |
+| Failed DB write mid-0004 migration | Runner's wrapping tx rolls back; new table not installed, old table intact. Next Wire re-runs Migrate, 0004 retries cleanly (file_version=4 > current=3). |
 
 ## Testing plan
 
@@ -378,7 +382,7 @@ No new smoke step required. Existing Plan 2c smoke (`embed model list/add/switch
 
 ## Risks
 
-1. **Migration 0004 partial failure.** SQLite table rebuilds are tx-wrapped; a power loss mid-migration leaves the DB in the pre-0004 state (old table intact). Next Wire re-runs Migrate, applies 0004 from scratch. Safe.
+1. **Migration 0004 partial failure.** The migrations runner wraps each file's body in a single tx (`migrations.go:97-107`); a power loss or mid-migration error rolls back, leaving the DB in the pre-0004 state (old `context_embedding` intact, `schema_version` still `3`). Next Wire re-runs Migrate, applies 0004 from scratch. Safe.
 
 2. **`loadAppFn` race in tests.** Tests swap a package-level var; parallel tests in the same package would race. Mitigation: RunE tests are NOT marked `t.Parallel()`. Acceptable for this scope.
 
