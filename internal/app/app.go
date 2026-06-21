@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"uni-context/internal/adapter/embedder/ollama"
@@ -195,6 +196,11 @@ func mkdirp(dirs ...string) error {
 	return nil
 }
 
+// osStderr is the indirection that lets tests capture the corrupt-config
+// warning without redirecting the real os.Stderr globally. Production
+// code points this at os.Stderr; tests swap it to a *bytes.Buffer.
+var osStderr io.Writer = os.Stderr
+
 // reconcilePlan2cSync runs once on first Plan 2c Wire invocation, gated by
 // schema_meta.plan_2c_synced. After first run, DB is authoritative and
 // cfg.Embedder (except `enabled`) is ignored — `embed switch` becomes the
@@ -221,9 +227,21 @@ func reconcilePlan2cSync(ctx context.Context, db *sql.DB, reg port.ModelRegistry
 	_, getErr := reg.Get(ctx, cfg.Model)
 	switch {
 	case getErr == nil:
-		// Row exists: heal config from cfg.Embedder.
+		// Row exists and scanned cleanly: heal provider + config from cfg.Embedder.
+		// This is the existing Plan 2c alias-row heal; unchanged.
 		if err := reg.UpdateConfig(ctx, cfg.Model, cfg.BaseURL, cfg.APIKey, cfg.Provider); err != nil {
 			return fmt.Errorf("heal config for %s: %w", cfg.Model, err)
+		}
+	case errors.Is(getErr, sqlite.ErrCorruptConfig):
+		// Row exists but config JSON is unreadable — UpdateConfig overwrites
+		// the corrupt blob. Stderr warning so the user knows we touched
+		// their DB; this is rare enough (manual edit / cross-version bug)
+		// that a warning is appropriate rather than silent heal.
+		fmt.Fprintf(osStderr,
+			"warning: model %s has corrupt config JSON; healing from config.yaml\n",
+			cfg.Model)
+		if err := reg.UpdateConfig(ctx, cfg.Model, cfg.BaseURL, cfg.APIKey, cfg.Provider); err != nil {
+			return fmt.Errorf("heal corrupt config for %s: %w", cfg.Model, err)
 		}
 	case errors.Is(getErr, domain.ErrNotFound):
 		// Row missing: register fresh.

@@ -45,6 +45,12 @@ type configJSON struct {
 
 const selectModelCols = `slug, name, provider, dimension, vec_table, is_default, status, config`
 
+// ErrCorruptConfig signals that an embedding_model.config value could not
+// be parsed as JSON. Callers may fall back to cfg.Embedder values or
+// surface to the user. app.reconcilePlan2cSync uses errors.Is against
+// this sentinel to self-heal a corrupt active-model row on first Wire.
+var ErrCorruptConfig = errors.New("embedding_model.config corrupt")
+
 func scanModel(row interface {
 	Scan(dest ...any) error
 }) (port.ModelDescriptor, error) {
@@ -60,7 +66,15 @@ func scanModel(row interface {
 	m.IsDefault = isDefault == 1
 	if cfg != "" {
 		var c configJSON
-		_ = json.Unmarshal([]byte(cfg), &c) // tolerate malformed JSON; surface empty
+		if err := json.Unmarshal([]byte(cfg), &c); err != nil {
+			// Surface the descriptor with whatever columns scanned cleanly
+			// (Slug/Name/Provider/Dimension/VecTable/IsDefault/Status) plus
+			// the sentinel. Callers that only need identity (slug lookups
+			// for SetDefault, etc.) can ignore the sentinel; callers that
+			// need BaseURL/APIKey must heal before using.
+			return m, fmt.Errorf("%w: config JSON parse: %s",
+				ErrCorruptConfig, err.Error())
+		}
 		m.BaseURL = c.BaseURL
 		m.APIKey = c.APIKey
 	}

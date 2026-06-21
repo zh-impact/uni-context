@@ -363,3 +363,47 @@ func TestWrapInsertErr_PassesThroughNonSqlite(t *testing.T) {
 	assert.Contains(t, err.Error(), "insert model row:")
 	assert.NotContains(t, err.Error(), "already registered")
 }
+
+// TestModelRegistry_scanModel_CorruptJSONReturnsErrCorruptConfig drives
+// scanModel through Get, with a manually-corrupted config column. The
+// sentinel must propagate via %w so reconcilePlan2cSync (app.go) can
+// errors.Is it.
+func TestModelRegistry_scanModel_CorruptJSONReturnsErrCorruptConfig(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+	ctx := context.Background()
+
+	// Insert a row with non-JSON config. Use Register first to create the
+	// vec table, then corrupt the row directly.
+	require.NoError(t, reg.Register(ctx, port.ModelSpec{
+		Slug: "corrupt", Provider: "openai", Dimension: 8,
+	}))
+	_, err := db.Exec(`UPDATE embedding_model SET config = 'not json' WHERE slug = 'corrupt'`)
+	require.NoError(t, err)
+
+	_, err = reg.Get(ctx, "corrupt")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCorruptConfig,
+		"Get on corrupt-config row must return ErrCorruptConfig (wrapped)")
+}
+
+// TestModelRegistry_scanModel_EmptyConfigIsOK confirms that the seeded
+// default '{}' config — which parses to a zero-value configJSON — does
+// NOT trigger ErrCorruptConfig. Regression guard: an over-eager check
+// that fires on empty JSON would block every seed row.
+func TestModelRegistry_scanModel_EmptyConfigIsOK(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+
+	// Insert a row whose config is the seeded default '{}'.
+	_, err := db.Exec(`
+		INSERT INTO embedding_model (slug, name, provider, dimension, vec_table, is_default, status, config, created_at)
+		VALUES ('empty-cfg', 'empty-cfg', 'ollama', 8, 'vec_empty_cfg_8', 0, 'active', '{}', 0)`)
+	require.NoError(t, err)
+
+	got, err := reg.Get(context.Background(), "empty-cfg")
+	require.NoError(t, err)
+	assert.Equal(t, "empty-cfg", got.Slug)
+	assert.Empty(t, got.BaseURL, "empty config = zero-value BaseURL")
+	assert.Empty(t, got.APIKey, "empty config = zero-value APIKey")
+}
