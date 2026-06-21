@@ -22,6 +22,12 @@ type ItemFilter struct {
 	//   *0 = only items NOT yet embedded
 	//   *1 = only items already embedded
 	AnyEmbedding *int
+
+	// NotDoneForModel, when non-empty, restricts results to items that
+	// lack a status='done' row in context_embedding for this model_slug.
+	// Used by ReembedService to find items pending migration to a new
+	// active model. Plan 2c addition.
+	NotDoneForModel string
 }
 
 // ContextRepo is the persistence port for ContextItem.
