@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 // ModelRegistry is the sqlite implementation of port.ModelRegistry. It owns
@@ -142,7 +145,7 @@ func (r *ModelRegistry) Register(ctx context.Context, spec port.ModelSpec) error
 		VALUES (?, ?, ?, ?, ?, 0, 'active', ?, strftime('%s','now'))
 	`, spec.Slug, spec.Slug, spec.Provider, spec.Dimension, vecTable, string(cfg))
 	if err != nil {
-		return fmt.Errorf("insert model row: %w", err)
+		return wrapInsertErr(err, spec.Slug)
 	}
 
 	createSQL := fmt.Sprintf(`
@@ -159,6 +162,18 @@ func (r *ModelRegistry) Register(ctx context.Context, spec port.ModelSpec) error
 		return fmt.Errorf("commit register: %w", err)
 	}
 	return nil
+}
+
+// wrapInsertErr detects UNIQUE-constraint violations from the embedding_model
+// INSERT path and surfaces them as "model <slug> already registered" (chained
+// via %w). The pre-check is the fast path for the common case; this handles
+// the race where two Register calls both pass the pre-check.
+func wrapInsertErr(err error, slug string) error {
+	var sqliteErr *sqlite3.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
+		return fmt.Errorf("model %s already registered: %w", slug, err)
+	}
+	return fmt.Errorf("insert model row: %w", err)
 }
 
 // UpdateConfig overwrites provider + config JSON for an existing slug.

@@ -3,11 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -317,4 +319,47 @@ func TestModelRegistry_List_TiebreakerOnSlug(t *testing.T) {
 	}
 	assert.Equal(t, []string{"aaa", "mmm", "zzz"}, slugs,
 		"tied created_at must tiebreak on slug ASC")
+}
+
+// TestWrapInsertErr_RewritesUNIQUEConstraint verifies the INSERT-path
+// error-wrapping: a sqlite3 UNIQUE-constraint error is surfaced as
+// "model <slug> already registered" (chained via %w) so callers see a
+// friendly message instead of raw "UNIQUE constraint failed: ..." text.
+// The original error stays chained for callers that want to errors.As it.
+func TestWrapInsertErr_RewritesUNIQUEConstraint(t *testing.T) {
+	synthetic := &sqlite3.Error{
+		Code:         sqlite3.ErrConstraint,
+		ExtendedCode: sqlite3.ErrConstraintUnique,
+	}
+	err := wrapInsertErr(synthetic, "race-slug")
+	assert.Contains(t, err.Error(), "model race-slug already registered",
+		"loser's error must lead with the friendly message")
+
+	// The chained original must still be reachable via errors.As, so
+	// advanced callers can branch on the underlying sqlite error.
+	var target *sqlite3.Error
+	require.True(t, errors.As(err, &target),
+		"chained sqlite3.Error must remain reachable via errors.As")
+	assert.Equal(t, sqlite3.ErrConstraintUnique, target.ExtendedCode)
+}
+
+// TestWrapInsertErr_PassesThroughNonUNIQUE verifies that non-UNIQUE
+// INSERT errors (e.g. types mismatch, disk full) are not rewritten —
+// they pass through with the generic "insert model row" prefix.
+func TestWrapInsertErr_PassesThroughNonUNIQUE(t *testing.T) {
+	synthetic := &sqlite3.Error{
+		Code:         sqlite3.ErrConstraint,
+		ExtendedCode: sqlite3.ErrConstraintForeignKey, // any non-UNIQUE code
+	}
+	err := wrapInsertErr(synthetic, "any-slug")
+	assert.Contains(t, err.Error(), "insert model row:")
+	assert.NotContains(t, err.Error(), "already registered")
+}
+
+// TestWrapInsertErr_PassesThroughNonSqlite verifies that non-sqlite3
+// errors (e.g. context cancelled) pass through unchanged.
+func TestWrapInsertErr_PassesThroughNonSqlite(t *testing.T) {
+	err := wrapInsertErr(errors.New("connection refused"), "any-slug")
+	assert.Contains(t, err.Error(), "insert model row:")
+	assert.NotContains(t, err.Error(), "already registered")
 }
