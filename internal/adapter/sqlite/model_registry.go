@@ -66,7 +66,7 @@ func scanModel(row interface {
 
 func (r *ModelRegistry) List(ctx context.Context) ([]port.ModelDescriptor, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT `+selectModelCols+` FROM embedding_model ORDER BY created_at ASC`)
+		`SELECT `+selectModelCols+` FROM embedding_model ORDER BY created_at ASC, slug ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
 	}

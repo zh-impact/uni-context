@@ -279,3 +279,42 @@ func TestModelRegistry_List_OrdersByCreation(t *testing.T) {
 	assert.Equal(t, "second", all[1].Slug)
 	assert.Equal(t, "third", all[2].Slug)
 }
+
+// TestModelRegistry_List_TiebreakerOnSlug locks in deterministic ordering
+// when multiple rows share created_at. SQLite stores created_at as epoch
+// seconds, so rows inserted within the same second tie — without a
+// secondary sort key, List returns them in arbitrary (often rowid) order,
+// flaking on slow CI. The tiebreaker is ', slug ASC'.
+func TestModelRegistry_List_TiebreakerOnSlug(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+	ctx := context.Background()
+
+	// Insert three rows with identical created_at by bypassing Register
+	// (which uses strftime('%s','now')). zzz/aaa/mmm so slug-ASC ordering
+	// differs from any insertion order.
+	_, err := db.Exec(`
+		INSERT INTO embedding_model (slug, name, provider, dimension, vec_table, is_default, status, config, created_at)
+		VALUES
+			('zzz', 'zzz', 'ollama', 8, 'vec_zzz_8', 0, 'active', '{}', 100),
+			('aaa', 'aaa', 'ollama', 8, 'vec_aaa_8', 0, 'active', '{}', 100),
+			('mmm', 'mmm', 'ollama', 8, 'vec_mmm_8', 0, 'active', '{}', 100)
+	`)
+	require.NoError(t, err)
+
+	all, err := reg.List(ctx)
+	require.NoError(t, err)
+
+	// Filter to the three we inserted (bge-m3 seed is also present, with
+	// its own created_at from strftime('%s','now') — comes first or last
+	// depending on test runtime; only the tied trio's relative order
+	// matters here).
+	var slugs []string
+	for _, m := range all {
+		if m.Slug == "aaa" || m.Slug == "mmm" || m.Slug == "zzz" {
+			slugs = append(slugs, m.Slug)
+		}
+	}
+	assert.Equal(t, []string{"aaa", "mmm", "zzz"}, slugs,
+		"tied created_at must tiebreak on slug ASC")
+}
