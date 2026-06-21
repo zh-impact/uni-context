@@ -103,34 +103,6 @@ func TestReembedService_EmbedsAllItemsWhenNoneDone(t *testing.T) {
 	assert.Equal(t, 0, report.Failed)
 }
 
-func TestReembedService_SkipsItemsAlreadyDoneForActiveModel(t *testing.T) {
-	items := []domain.ContextItem{
-		{ID: "i1", Title: "t1", Content: "c1"},
-		{ID: "i2", Title: "t2", Content: "c2"},
-	}
-	spy := &embedSpy{}
-	svc, embRepo := newReembedServiceForTest(t, items, spy)
-	// Mark i1 as already done under the active model. NOTE: the
-	// ReembedService filters via the repo's List path; our fakeListRepo
-	// ignores ItemFilter and returns all items, so we cannot exercise
-	// filter-side exclusion here. The filter behavior is verified in the
-	// sqlite adapter test for NotDoneForModel. This test instead asserts
-	// that an item with a pre-existing 'done' status row is still
-	// re-embedded (the service does not itself consult EmbeddingRepo).
-	// Keep the assertion that the run completes successfully.
-	embRepo.statusByItem["i1"] = port.EmbeddingStatus{
-		ItemID: "i1", ModelSlug: "active-model", Status: "done",
-	}
-
-	report, err := svc.Run(context.Background(), 0, false)
-	require.NoError(t, err)
-	// With the fake repo ignoring NotDoneForModel, both items are scanned.
-	// Adjust the assertion to reflect that — filter enforcement belongs to
-	// the sqlite adapter test, not this service-level test.
-	assert.Equal(t, 2, report.Scanned, "fakeListRepo ignores NotDoneForModel; both items scanned")
-	assert.Equal(t, 2, report.Embedded)
-}
-
 func TestReembedService_ProcessesItemsDoneForOtherModelsOnly(t *testing.T) {
 	// An item done under 'bge-m3' but not under active 'active-model'
 	// must be re-embedded.
