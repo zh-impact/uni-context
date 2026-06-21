@@ -18,6 +18,8 @@ var (
 	backfillLimit  int
 	backfillDryRun bool
 	workerInterval time.Duration
+	reembedLimit   int
+	reembedDryRun  bool
 )
 
 // embedCmd is the parent for embedding-related subcommands. It has no
@@ -193,6 +195,74 @@ var embedModelRemoveCmd = &cobra.Command{
 	},
 }
 
+// embedSwitchCmd flips is_default atomically to a registered model. It
+// touches only the registry metadata — the new model's vec table stays
+// empty until `embed reembed` runs. Prints a stderr reminder so users
+// don't forget to migrate existing items.
+var embedSwitchCmd = &cobra.Command{
+	Use:   "switch",
+	Short: "Set a registered model as the active default (atomic)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadApp()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.Registry == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		slug := args[0]
+		if err := a.Registry.SetDefault(cmd.Context(), slug); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr,
+			"Active model switched to %s. Run 'unictx embed reembed' to migrate existing items.\n",
+			slug)
+		return nil
+	},
+}
+
+// embedReembedCmd bulk-embeds items that lack a status='done' row for the
+// active model. Mirrors embedBackfillCmd's shape: --limit caps the batch,
+// --dry-run counts candidates without embedding. Ctrl+C (SIGINT/SIGTERM)
+// cancels mid-batch via signalContext.
+var embedReembedCmd = &cobra.Command{
+	Use:   "reembed",
+	Short: "Re-embed items lacking a done status row for the active model",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadApp()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.Reembed == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		ctx := signalContext()
+		report, err := a.Reembed.Run(ctx, reembedLimit, reembedDryRun)
+		if err != nil {
+			return err
+		}
+
+		if reembedDryRun {
+			fmt.Printf("dry run: would re-embed %d items\n", report.Scanned)
+			return nil
+		}
+		fmt.Printf("reembed complete: embedded=%d failed=%d scanned=%d\n",
+			report.Embedded, report.Failed, report.Scanned)
+		if len(report.Failures) > 0 {
+			fmt.Println("failures:")
+			for _, f := range report.Failures {
+				fmt.Printf("  %s: %s\n", f.ItemID, f.Error)
+			}
+		}
+		return nil
+	},
+}
+
 func init() {
 	embedBackfillCmd.Flags().IntVar(&backfillLimit, "limit", 0,
 		"max items to embed (0 = no limit)")
@@ -200,6 +270,10 @@ func init() {
 		"count candidates without embedding")
 	embedWorkerCmd.Flags().DurationVar(&workerInterval, "interval", 30*time.Second,
 		"poll interval for failed-embedding retries")
+	embedReembedCmd.Flags().IntVar(&reembedLimit, "limit", 0,
+		"max items to embed (0 = no limit)")
+	embedReembedCmd.Flags().BoolVar(&reembedDryRun, "dry-run", false,
+		"count candidates without embedding")
 
 	embedModelAddCmd.Flags().StringVar(&modelAddProvider, "provider", "",
 		"embedder provider (ollama|openai)")
@@ -216,6 +290,8 @@ func init() {
 
 	embedCmd.AddCommand(embedBackfillCmd)
 	embedCmd.AddCommand(embedWorkerCmd)
-	embedCmd.AddCommand(embedModelCmd) // Plan 2c
+	embedCmd.AddCommand(embedModelCmd)   // Plan 2c
+	embedCmd.AddCommand(embedSwitchCmd)  // Plan 2c
+	embedCmd.AddCommand(embedReembedCmd) // Plan 2c
 	rootCmd.AddCommand(embedCmd)
 }

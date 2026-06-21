@@ -18,9 +18,18 @@ func TestEmbedCmd_HasExpectedSubcommands(t *testing.T) {
 	for _, c := range subs {
 		names = append(names, c.Use)
 	}
-	for _, want := range []string{"backfill", "worker", "model"} {
+	for _, want := range []string{"backfill", "worker", "model", "switch", "reembed"} {
 		assert.Contains(t, names, want, "embed must expose %q subcommand", want)
 	}
+}
+
+// TestEmbedReembedCmd_HasLimitAndDryRunFlags is a structural test that
+// confirms the expected flags exist on the `embed reembed` subcommand.
+func TestEmbedReembedCmd_HasLimitAndDryRunFlags(t *testing.T) {
+	sub := findSub(embedCmd, "reembed")
+	require.NotNil(t, sub)
+	assert.NotNil(t, sub.Flags().Lookup("limit"))
+	assert.NotNil(t, sub.Flags().Lookup("dry-run"))
 }
 
 // TestEmbedModelCmd_AddParsesFlags is a structural test that confirms the
