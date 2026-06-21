@@ -19,7 +19,7 @@ func TestMigrations_RunOnFreshDB(t *testing.T) {
 	var version string
 	err = db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version)
 	require.NoError(t, err)
-	assert.Equal(t, "3", version)
+	assert.Equal(t, "4", version)
 
 	// Tables exist
 	for _, table := range []string{"context_item", "context_fts", "project", "schema_meta"} {
@@ -91,11 +91,13 @@ func TestMigrations_0003_AddsRetryColumns(t *testing.T) {
 
 	require.NoError(t, Migrate(db))
 
-	// schema_version is now "3" after 0003
+	// schema_version is "4" after 0003 + 0004 (full Migrate runs all).
+	// This test's focus is the columns 0003 added; the version check
+	// just guards against a regression that drops a later migration.
 	var version string
 	require.NoError(t, db.QueryRow(
 		`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version))
-	assert.Equal(t, "3", version)
+	assert.Equal(t, "4", version)
 
 	// attempts + last_error columns exist on context_embedding.
 	// PRAGMA table_info is the canonical way to inspect columns.

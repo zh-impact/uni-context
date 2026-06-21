@@ -3,11 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -278,4 +280,130 @@ func TestModelRegistry_List_OrdersByCreation(t *testing.T) {
 	assert.Equal(t, "bge-m3", all[0].Slug, "seed first")
 	assert.Equal(t, "second", all[1].Slug)
 	assert.Equal(t, "third", all[2].Slug)
+}
+
+// TestModelRegistry_List_TiebreakerOnSlug locks in deterministic ordering
+// when multiple rows share created_at. SQLite stores created_at as epoch
+// seconds, so rows inserted within the same second tie — without a
+// secondary sort key, List returns them in arbitrary (often rowid) order,
+// flaking on slow CI. The tiebreaker is ', slug ASC'.
+func TestModelRegistry_List_TiebreakerOnSlug(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+	ctx := context.Background()
+
+	// Insert three rows with identical created_at by bypassing Register
+	// (which uses strftime('%s','now')). zzz/aaa/mmm so slug-ASC ordering
+	// differs from any insertion order.
+	_, err := db.Exec(`
+		INSERT INTO embedding_model (slug, name, provider, dimension, vec_table, is_default, status, config, created_at)
+		VALUES
+			('zzz', 'zzz', 'ollama', 8, 'vec_zzz_8', 0, 'active', '{}', 100),
+			('aaa', 'aaa', 'ollama', 8, 'vec_aaa_8', 0, 'active', '{}', 100),
+			('mmm', 'mmm', 'ollama', 8, 'vec_mmm_8', 0, 'active', '{}', 100)
+	`)
+	require.NoError(t, err)
+
+	all, err := reg.List(ctx)
+	require.NoError(t, err)
+
+	// Filter to the three we inserted (bge-m3 seed is also present, with
+	// its own created_at from strftime('%s','now') — comes first or last
+	// depending on test runtime; only the tied trio's relative order
+	// matters here).
+	var slugs []string
+	for _, m := range all {
+		if m.Slug == "aaa" || m.Slug == "mmm" || m.Slug == "zzz" {
+			slugs = append(slugs, m.Slug)
+		}
+	}
+	assert.Equal(t, []string{"aaa", "mmm", "zzz"}, slugs,
+		"tied created_at must tiebreak on slug ASC")
+}
+
+// TestWrapInsertErr_RewritesUNIQUEConstraint verifies the INSERT-path
+// error-wrapping: a sqlite3 UNIQUE-constraint error is surfaced as
+// "model <slug> already registered" (chained via %w) so callers see a
+// friendly message instead of raw "UNIQUE constraint failed: ..." text.
+// The original error stays chained for callers that want to errors.As it.
+func TestWrapInsertErr_RewritesUNIQUEConstraint(t *testing.T) {
+	synthetic := &sqlite3.Error{
+		Code:         sqlite3.ErrConstraint,
+		ExtendedCode: sqlite3.ErrConstraintUnique,
+	}
+	err := wrapInsertErr(synthetic, "race-slug")
+	assert.Contains(t, err.Error(), "model race-slug already registered",
+		"loser's error must lead with the friendly message")
+
+	// The chained original must still be reachable via errors.As, so
+	// advanced callers can branch on the underlying sqlite error.
+	var target *sqlite3.Error
+	require.True(t, errors.As(err, &target),
+		"chained sqlite3.Error must remain reachable via errors.As")
+	assert.Equal(t, sqlite3.ErrConstraintUnique, target.ExtendedCode)
+}
+
+// TestWrapInsertErr_PassesThroughNonUNIQUE verifies that non-UNIQUE
+// INSERT errors (e.g. types mismatch, disk full) are not rewritten —
+// they pass through with the generic "insert model row" prefix.
+func TestWrapInsertErr_PassesThroughNonUNIQUE(t *testing.T) {
+	synthetic := &sqlite3.Error{
+		Code:         sqlite3.ErrConstraint,
+		ExtendedCode: sqlite3.ErrConstraintForeignKey, // any non-UNIQUE code
+	}
+	err := wrapInsertErr(synthetic, "any-slug")
+	assert.Contains(t, err.Error(), "insert model row:")
+	assert.NotContains(t, err.Error(), "already registered")
+}
+
+// TestWrapInsertErr_PassesThroughNonSqlite verifies that non-sqlite3
+// errors (e.g. context cancelled) pass through unchanged.
+func TestWrapInsertErr_PassesThroughNonSqlite(t *testing.T) {
+	err := wrapInsertErr(errors.New("connection refused"), "any-slug")
+	assert.Contains(t, err.Error(), "insert model row:")
+	assert.NotContains(t, err.Error(), "already registered")
+}
+
+// TestModelRegistry_scanModel_CorruptJSONReturnsErrCorruptConfig drives
+// scanModel through Get, with a manually-corrupted config column. The
+// sentinel must propagate via %w so reconcilePlan2cSync (app.go) can
+// errors.Is it.
+func TestModelRegistry_scanModel_CorruptJSONReturnsErrCorruptConfig(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+	ctx := context.Background()
+
+	// Insert a row with non-JSON config. Use Register first to create the
+	// vec table, then corrupt the row directly.
+	require.NoError(t, reg.Register(ctx, port.ModelSpec{
+		Slug: "corrupt", Provider: "openai", Dimension: 8,
+	}))
+	_, err := db.Exec(`UPDATE embedding_model SET config = 'not json' WHERE slug = 'corrupt'`)
+	require.NoError(t, err)
+
+	_, err = reg.Get(ctx, "corrupt")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCorruptConfig,
+		"Get on corrupt-config row must return ErrCorruptConfig (wrapped)")
+}
+
+// TestModelRegistry_scanModel_EmptyConfigIsOK confirms that the seeded
+// default '{}' config — which parses to a zero-value configJSON — does
+// NOT trigger ErrCorruptConfig. Regression guard: an over-eager check
+// that fires on empty JSON would block every seed row.
+func TestModelRegistry_scanModel_EmptyConfigIsOK(t *testing.T) {
+	db := openTestDB(t)
+	reg := NewModelRegistry(db)
+
+	// Insert a row whose config is the seeded default '{}'.
+	_, err := db.Exec(`
+		INSERT INTO embedding_model (slug, name, provider, dimension, vec_table, is_default, status, config, created_at)
+		VALUES ('empty-cfg', 'empty-cfg', 'ollama', 8, 'vec_empty_cfg_8', 0, 'active', '{}', 0)`)
+	require.NoError(t, err)
+
+	got, err := reg.Get(context.Background(), "empty-cfg")
+	require.NoError(t, err)
+	assert.Equal(t, "empty-cfg", got.Slug)
+	assert.Empty(t, got.BaseURL, "empty config = zero-value BaseURL")
+	assert.Empty(t, got.APIKey, "empty config = zero-value APIKey")
 }

@@ -219,7 +219,6 @@ plan and `.superpowers/sdd/progress.md` for execution notes.
 - Multi-model parallel embedding + per-model vec tables
 - Re-embedding when switching models
 - Provider auto-detection / encoding formats (OpenAI-compat polish)
-- `unictx embed status <id>` (read-only status inspection)
 - True async ingest queue (goroutine + channel, return immediately)
 
 ## Plan 2c — Multi-Model Registry & Migration (2026-06-21)
@@ -276,8 +275,47 @@ for the design.
 - Per-call model parameter on `EmbedService.Embed`
 - Provider auto-detection (probe `/v1/models` endpoint)
 - OpenAI batched embeddings API (1 request, N inputs)
-- `unictx embed status <id>` (read-only status inspection)
 - Migrating Plan 2b alias rows to per-slug vec tables
+
+## Plan 2c Follow-up — Cleanup, Polish, and `embed status` (2026-06-21)
+
+Six-task TDD bundle closing Plan 2c's deferred items and tightening the
+ragged edges surfaced during final review. See
+`.superpowers/sdd/progress.md` for execution notes.
+
+**What shipped:**
+- **Migration 0004** (`internal/adapter/sqlite/migrations/0004_embedding_model_slug_cascade.sql`):
+  `context_embedding.model_slug` FK is now `ON DELETE CASCADE`. The
+  explicit `DELETE FROM context_embedding` inside `ModelRegistry.Remove`
+  becomes defense-in-depth — still correct on DBs that pre-date 0004 or
+  have FK enforcement off.
+- **Race-friendly `Register`:** two concurrent `Register` calls that
+  both lose the pre-check race now see
+  `model <slug> already registered: <chained sqlite3 error>` instead of
+  raw UNIQUE-constraint text. Detection via
+  `errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique`.
+  The pre-check is retained as the fast path.
+- **`List` tiebreaker:** `ORDER BY created_at ASC, slug ASC` eliminates
+  CI flake when rows share an epoch-second `created_at`.
+- **Corrupt-config self-heal:** `scanModel` now surfaces
+  `sqlite.ErrCorruptConfig` (exported sentinel) instead of silently
+  returning empty BaseURL/APIKey. `reconcilePlan2cSync` catches the
+  sentinel on first Wire, emits a stderr warning, and overwrites the
+  config from `cfg.Embedder` via `UpdateConfig`.
+- **New `unictx embed status <id>` command:** read-only tabular output
+  of all `context_embedding` rows for an item, ordered by
+  `model_slug ASC`. Backed by new `port.EmbeddingRepo.ListForItem`
+  method (returns an empty slice, not nil).
+- **RunE-level CLI tests:** `loadAppFn` indirection in `embed.go`
+  enables RunE tests without subprocess overhead. The 5 existing
+  subcommands (add/list/remove/switch/reembed) now have RunE coverage
+  via a stubbed `*App`.
+
+### Known Limitation (Plan 2c Follow-up)
+
+- **`embed model list` and `embed model remove` surface raw error text
+  when a row has corrupt config JSON.** Graceful handling (`<corrupt>`
+  display / refuse-with-message) is deferred to Plan 2d+.
 
 ## Bugfix — OpenAI adapter string-error tolerance (2026-06-21)
 

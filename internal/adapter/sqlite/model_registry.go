@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 // ModelRegistry is the sqlite implementation of port.ModelRegistry. It owns
@@ -42,6 +45,12 @@ type configJSON struct {
 
 const selectModelCols = `slug, name, provider, dimension, vec_table, is_default, status, config`
 
+// ErrCorruptConfig signals that an embedding_model.config value could not
+// be parsed as JSON. Callers may fall back to cfg.Embedder values or
+// surface to the user. app.reconcilePlan2cSync uses errors.Is against
+// this sentinel to self-heal a corrupt active-model row on first Wire.
+var ErrCorruptConfig = errors.New("embedding_model.config corrupt")
+
 func scanModel(row interface {
 	Scan(dest ...any) error
 }) (port.ModelDescriptor, error) {
@@ -57,7 +66,15 @@ func scanModel(row interface {
 	m.IsDefault = isDefault == 1
 	if cfg != "" {
 		var c configJSON
-		_ = json.Unmarshal([]byte(cfg), &c) // tolerate malformed JSON; surface empty
+		if err := json.Unmarshal([]byte(cfg), &c); err != nil {
+			// Surface the descriptor with whatever columns scanned cleanly
+			// (Slug/Name/Provider/Dimension/VecTable/IsDefault/Status) plus
+			// the sentinel. Callers that only need identity (slug lookups
+			// for SetDefault, etc.) can ignore the sentinel; callers that
+			// need BaseURL/APIKey must heal before using.
+			return m, fmt.Errorf("%w: config JSON parse: %s",
+				ErrCorruptConfig, err.Error())
+		}
 		m.BaseURL = c.BaseURL
 		m.APIKey = c.APIKey
 	}
@@ -66,7 +83,7 @@ func scanModel(row interface {
 
 func (r *ModelRegistry) List(ctx context.Context) ([]port.ModelDescriptor, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT `+selectModelCols+` FROM embedding_model ORDER BY created_at ASC`)
+		`SELECT `+selectModelCols+` FROM embedding_model ORDER BY created_at ASC, slug ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
 	}
@@ -142,7 +159,7 @@ func (r *ModelRegistry) Register(ctx context.Context, spec port.ModelSpec) error
 		VALUES (?, ?, ?, ?, ?, 0, 'active', ?, strftime('%s','now'))
 	`, spec.Slug, spec.Slug, spec.Provider, spec.Dimension, vecTable, string(cfg))
 	if err != nil {
-		return fmt.Errorf("insert model row: %w", err)
+		return wrapInsertErr(err, spec.Slug)
 	}
 
 	createSQL := fmt.Sprintf(`
@@ -159,6 +176,18 @@ func (r *ModelRegistry) Register(ctx context.Context, spec port.ModelSpec) error
 		return fmt.Errorf("commit register: %w", err)
 	}
 	return nil
+}
+
+// wrapInsertErr detects UNIQUE-constraint violations from the embedding_model
+// INSERT path and surfaces them as "model <slug> already registered" (chained
+// via %w). The pre-check is the fast path for the common case; this handles
+// the race where two Register calls both pass the pre-check.
+func wrapInsertErr(err error, slug string) error {
+	var sqliteErr *sqlite3.Error
+	if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
+		return fmt.Errorf("model %s already registered: %w", slug, err)
+	}
+	return fmt.Errorf("insert model row: %w", err)
 }
 
 // UpdateConfig overwrites provider + config JSON for an existing slug.
@@ -263,9 +292,9 @@ func (r *ModelRegistry) Remove(ctx context.Context, slug string) error {
 		fmt.Sprintf(`DROP TABLE IF EXISTS %s`, vecTable)); err != nil {
 		return fmt.Errorf("drop vec table %s: %w", vecTable, err)
 	}
-	// context_embedding.model_slug FK is RESTRICT (no ON DELETE clause in
-	// migration 0002). This explicit DELETE is mandatory; without it, the
-	// row delete below would raise a FK constraint violation.
+	// Defense-in-depth. After migration 0004, the model_slug FK ON DELETE
+	// CASCADE drops these rows automatically; this explicit DELETE ensures
+	// correctness on DBs that pre-date 0004 or have FK enforcement off.
 	if _, err = tx.ExecContext(ctx,
 		`DELETE FROM context_embedding WHERE model_slug = ?`, slug); err != nil {
 		return fmt.Errorf("delete status rows for model %s: %w", slug, err)

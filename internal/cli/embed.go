@@ -22,6 +22,12 @@ var (
 	reembedDryRun  bool
 )
 
+// loadAppFn is the indirection that enables RunE-level tests. Tests swap
+// it to return a stubbed *App; production code leaves the default. Only
+// embed.go uses this — other CLI files call loadApp() directly.
+// Plan 2c follow-up addition.
+var loadAppFn = loadApp
+
 // embedCmd is the parent for embedding-related subcommands. It has no
 // RunE of its own — invoking `unictx embed` without a subcommand prints
 // the cobra help text.
@@ -37,7 +43,7 @@ var embedBackfillCmd = &cobra.Command{
 	Use:   "backfill",
 	Short: "Embed all items where any_embedding=0 (idempotent)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -76,7 +82,7 @@ var embedWorkerCmd = &cobra.Command{
 	Use:   "worker",
 	Short: "Long-running retry loop for status=failed embeddings (Ctrl+C to stop)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -125,7 +131,7 @@ var embedModelAddCmd = &cobra.Command{
 	Short: "Register a new embedding model (creates its vec table)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -150,7 +156,7 @@ var embedModelListCmd = &cobra.Command{
 	Short: "List all registered embedding models",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -182,7 +188,7 @@ var embedModelRemoveCmd = &cobra.Command{
 	Short: "Drop a model's vec table + delete its row (refuses default + shared)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -204,7 +210,7 @@ var embedSwitchCmd = &cobra.Command{
 	Short: "Set a registered model as the active default (atomic)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -232,7 +238,7 @@ var embedReembedCmd = &cobra.Command{
 	Use:   "reembed",
 	Short: "Re-embed items lacking a done status row for the active model",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		a, _, err := loadApp()
+		a, _, err := loadAppFn()
 		if err != nil {
 			return err
 		}
@@ -260,6 +266,47 @@ var embedReembedCmd = &cobra.Command{
 			}
 		}
 		return nil
+	},
+}
+
+// embedStatusCmd prints all context_embedding status rows for a given
+// item, ordered by model_slug ASC. Read-only; safe to run anytime. Used
+// to inspect per-model migration state during `embed switch` workflows.
+// Plan 2c follow-up addition.
+var embedStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show embedding status rows for an item (all models)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadAppFn()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.EmbeddingRepo == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		rows, err := a.EmbeddingRepo.ListForItem(cmd.Context(), args[0])
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			fmt.Printf("no embedding status rows for item %s\n", args[0])
+			return nil
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "MODEL_SLUG\tSTATUS\tATTEMPTS\tLAST_ERROR\tEMBEDDED_AT")
+		for _, r := range rows {
+			errCell := r.LastError
+			if len(errCell) > 40 {
+				errCell = errCell[:37] + "..."
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%d\n",
+				r.ModelSlug, r.Status, r.Attempts, errCell, r.EmbeddedAt.Unix())
+		}
+		return w.Flush()
 	},
 }
 
@@ -293,5 +340,6 @@ func init() {
 	embedCmd.AddCommand(embedModelCmd)   // Plan 2c
 	embedCmd.AddCommand(embedSwitchCmd)  // Plan 2c
 	embedCmd.AddCommand(embedReembedCmd) // Plan 2c
+	embedCmd.AddCommand(embedStatusCmd)  // Plan 2c follow-up
 	rootCmd.AddCommand(embedCmd)
 }

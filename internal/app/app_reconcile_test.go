@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"uni-context/internal/adapter/sqlite"
@@ -144,4 +145,92 @@ func TestReconcilePlan2cSync_ProducesUsableActiveDescriptor(t *testing.T) {
 		VecTable: "vec_text_embedding_3_small_1536", IsDefault: true,
 		Status: "active",
 	}, active)
+}
+
+// TestReconcilePlan2cSync_CorruptActiveConfig_HealsFromCfg proves the
+// self-heal path: when the active model row exists but its config is
+// unreadable JSON, reconcile must surface a stderr warning, overwrite
+// the config from cfg.Embedder fields, and set the plan_2c_synced flag.
+// Without the fix, the corrupt JSON surfaced as ErrCorruptConfig from
+// reg.Get, fell through to the default error case, and Wire returned
+// "lookup <slug>: ..." — leaving the DB unusable.
+func TestReconcilePlan2cSync_CorruptActiveConfig_HealsFromCfg(t *testing.T) {
+	db := newReconcileDB(t)
+	reg := sqlite.NewModelRegistry(db)
+
+	// Migration 0002 already seeded the 'bge-m3' row. Corrupt its config
+	// in place — simulates a buggy older build or a manual DB edit gone
+	// wrong. A fresh UPDATE avoids fighting the seed INSERT.
+	_, err := db.Exec(`UPDATE embedding_model SET config = 'not json' WHERE slug = 'bge-m3'`)
+	require.NoError(t, err)
+
+	// Capture the stderr warning via the osStderr indirection declared in
+	// app.go. t.Cleanup restores the production writer even on assertion
+	// failure.
+	var stderrBuf strings.Builder
+	prevStderr := osStderr
+	osStderr = &stderrBuf
+	t.Cleanup(func() { osStderr = prevStderr })
+
+	cfg := config.EmbedderConfig{
+		Enabled:  true,
+		Model:    "bge-m3",
+		Provider: "openai",
+		BaseURL:  "http://lmstudio:1234/v1",
+		APIKey:   "sk-test",
+	}
+
+	err = reconcilePlan2cSync(context.Background(), db, reg, cfg)
+	require.NoError(t, err, "reconcile must self-heal rather than fail")
+
+	// Row's config now parses cleanly and carries cfg.Embedder values.
+	got, err := reg.Get(context.Background(), "bge-m3")
+	require.NoError(t, err)
+	assert.Equal(t, "openai", got.Provider)
+	assert.Equal(t, "http://lmstudio:1234/v1", got.BaseURL)
+	assert.Equal(t, "sk-test", got.APIKey)
+
+	// Stderr warning fired.
+	assert.Contains(t, stderrBuf.String(), "corrupt config JSON",
+		"reconcile must warn the user that it healed a corrupt row")
+
+	// plan_2c_synced flag set so next Wire skips reconcile.
+	var synced string
+	require.NoError(t, db.QueryRow(
+		`SELECT value FROM schema_meta WHERE key = 'plan_2c_synced'`).Scan(&synced))
+	assert.Equal(t, "1", synced)
+}
+
+// TestReconcilePlan2cSync_CleanConfigIsUntouched confirms that a row with
+// valid JSON is NOT healed (UpdateConfig would still overwrite it, which
+// is the existing Plan 2c behavior — the test just locks that in so the
+// new case branch does not regress the happy path).
+func TestReconcilePlan2cSync_CleanConfigIsUntouched(t *testing.T) {
+	db := newReconcileDB(t)
+	reg := sqlite.NewModelRegistry(db)
+
+	cfg := config.EmbedderConfig{
+		Enabled:  true,
+		Model:    "bge-m3",
+		Provider: "ollama",
+		BaseURL:  "http://localhost:11434",
+		APIKey:   "",
+	}
+
+	prevStderr := osStderr
+	var stderrBuf strings.Builder
+	osStderr = &stderrBuf
+	t.Cleanup(func() { osStderr = prevStderr })
+
+	require.NoError(t, reconcilePlan2cSync(context.Background(), db, reg, cfg))
+	assert.NotContains(t, stderrBuf.String(), "corrupt",
+		"clean row must not trigger the corrupt-config warning")
+
+	// Config reflects cfg.Embedder values (the existing alias-heal path
+	// runs unconditionally on getErr == nil — this is Plan 2c behavior,
+	// not new).
+	got, err := reg.Get(context.Background(), "bge-m3")
+	require.NoError(t, err)
+	assert.Equal(t, "ollama", got.Provider)
+	assert.Equal(t, "http://localhost:11434", got.BaseURL)
 }
