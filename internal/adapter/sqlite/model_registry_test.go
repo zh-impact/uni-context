@@ -16,9 +16,14 @@ import (
 // migration seeds slug='bge-m3', dimension=1024, vec_table='vec_bge_m3_1024',
 // is_default=1.
 //
-// DSN enables _foreign_keys=on to match production Open() — required for the
-// Remove cascade test (DELETE from embedding_model must cascade to
-// context_embedding via FK ON DELETE CASCADE declared in migration 0002).
+// DSN enables _foreign_keys=on to match production Open() — required for
+// TestModelRegistry_Remove_CascadesEmbeddingStatusRows: the
+// context_embedding.model_slug FK is RESTRICT (migration 0002 declares
+// REFERENCES embedding_model(slug) with no ON DELETE clause), so the
+// Remove implementation must DELETE the status rows explicitly inside
+// its transaction before deleting the embedding_model row. Without that
+// explicit DELETE (and FK enforcement on), the row delete would raise a
+// FK constraint violation.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite3", "file::memory:?_foreign_keys=on")
@@ -217,7 +222,14 @@ func TestModelRegistry_Remove_NonDefaultSucceeds(t *testing.T) {
 	assert.Equal(t, 0, n, "vec table dropped")
 }
 
-func TestModelRegistry_Remove_CascadesEmbeddingStatusRows(t *testing.T) {
+// TestModelRegistry_Remove_DeletesEmbeddingStatusRowsExplicitly verifies the
+// Remove implementation deletes context_embedding rows inside its tx.
+// Migration 0002 declares context_embedding.model_slug REFERENCES
+// embedding_model(slug) with no ON DELETE clause — FK default is RESTRICT,
+// so the explicit DELETE FROM context_embedding in Remove is mandatory;
+// without it the subsequent DELETE FROM embedding_model would raise a
+// FK constraint violation under _foreign_keys=on.
+func TestModelRegistry_Remove_DeletesEmbeddingStatusRowsExplicitly(t *testing.T) {
 	db := openTestDB(t)
 	reg := NewModelRegistry(db)
 	ctx := context.Background()
@@ -240,11 +252,12 @@ func TestModelRegistry_Remove_CascadesEmbeddingStatusRows(t *testing.T) {
 
 	require.NoError(t, reg.Remove(ctx, "nomic-embed-text"))
 
-	// context_embedding row should be cascade-deleted.
+	// context_embedding rows gone (Remove's explicit DELETE inside the tx
+	// cleaned them up; FK is RESTRICT, not CASCADE).
 	var n int
 	require.NoError(t, db.QueryRow(
 		`SELECT count(*) FROM context_embedding WHERE model_slug='nomic-embed-text'`).Scan(&n))
-	assert.Equal(t, 0, n, "status rows cascade-deleted")
+	assert.Equal(t, 0, n, "status rows deleted by Remove tx")
 }
 
 func TestModelRegistry_List_OrdersByCreation(t *testing.T) {

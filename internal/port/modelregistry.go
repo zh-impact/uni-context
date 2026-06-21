@@ -59,7 +59,11 @@ type ModelRegistry interface {
 	SetDefault(ctx context.Context, slug string) error
 
 	// Remove drops the model's vec table and deletes its embedding_model row.
-	// context_embedding rows cascade-delete via FK ON DELETE CASCADE.
+	// context_embedding rows referencing this slug are deleted explicitly
+	// inside the implementation's transaction. The FK on
+	// context_embedding.model_slug is RESTRICT (no ON DELETE clause in
+	// migration 0002), so the explicit DELETE is mandatory — without it,
+	// the embedding_model row delete would raise a FK constraint violation.
 	// Refuses with a clear error if:
 	//   - slug does not exist (wraps domain.ErrNotFound)
 	//   - slug is_default=1 (caller must switch first)

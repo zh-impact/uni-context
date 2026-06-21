@@ -263,9 +263,9 @@ func (r *ModelRegistry) Remove(ctx context.Context, slug string) error {
 		fmt.Sprintf(`DROP TABLE IF EXISTS %s`, vecTable)); err != nil {
 		return fmt.Errorf("drop vec table %s: %w", vecTable, err)
 	}
-	// context_embedding.model_slug has no ON DELETE CASCADE in migration 0002
-	// (only item_id does), so we delete status rows explicitly before the
-	// model row. Safe to run even if no status rows exist.
+	// context_embedding.model_slug FK is RESTRICT (no ON DELETE clause in
+	// migration 0002). This explicit DELETE is mandatory; without it, the
+	// row delete below would raise a FK constraint violation.
 	if _, err = tx.ExecContext(ctx,
 		`DELETE FROM context_embedding WHERE model_slug = ?`, slug); err != nil {
 		return fmt.Errorf("delete status rows for model %s: %w", slug, err)
