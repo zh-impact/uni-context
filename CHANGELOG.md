@@ -226,9 +226,9 @@ plan and `.superpowers/sdd/progress.md` for execution notes.
 
 Replaces the Plan 2a `EnsureModelRegistered` placeholder with a runtime
 model registry. Adds CLI commands for model lifecycle and migration.
-The active model's source of truth moves from `config.Embedder.Model`
-to `embedding_model.is_default`, with a one-time reconciliation on
-first Plan 2c run. See
+On first Plan 2c run, `config.Embedder.Model` seeds the registry via
+`reconcilePlan2cSync`; thereafter `embedding_model.is_default` is
+authoritative, and only `embed switch` can change the active model. See
 `docs/superpowers/specs/2026-06-21-plan-2c-multi-model-registry-design.md`
 for the design.
 
