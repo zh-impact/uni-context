@@ -46,6 +46,10 @@ type App struct {
 	// Plan 2c: bulk re-embed items under the active model after `embed switch`.
 	Reembed *service.ReembedService
 
+	// Registry is non-nil when cfg.Embedder.Enabled is true. CLI uses it
+	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
+	Registry port.ModelRegistry
+
 	Ingest *service.IngestService
 	Search *service.SearchService
 }
@@ -92,8 +96,12 @@ func Wire(cfg *config.Config) (*App, error) {
 	// reembed is nil unless embedder is enabled. Plan 2c: bulk re-embeds
 	// items lacking a done row for the active model (post `embed switch`).
 	var reembed *service.ReembedService
+	// registry is nil unless embedder is enabled. Plan 2c Task 4: exposes
+	// the ModelRegistry so the CLI's `embed model add/list/remove` can
+	// reach it without re-deriving a handle from the DB.
+	var registry port.ModelRegistry
 	if cfg.Embedder.Enabled {
-		registry := sqlite.NewModelRegistry(db)
+		registry = sqlite.NewModelRegistry(db)
 
 		// First-Plan-2c-run reconciliation. After this, DB is authoritative
 		// and `embed switch` is the only way to change the active model.
@@ -164,6 +172,7 @@ func Wire(cfg *config.Config) (*App, error) {
 		Backfill:      backfill,
 		Worker:        worker,
 		Reembed:       reembed,
+		Registry:      registry,
 		Ingest:        ingest,
 		Search:        search,
 	}, nil

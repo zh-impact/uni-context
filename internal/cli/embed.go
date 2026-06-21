@@ -6,7 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"text/tabwriter"
 	"time"
+
+	"uni-context/internal/port"
 
 	"github.com/spf13/cobra"
 )
@@ -100,6 +103,96 @@ func signalContext() context.Context {
 	return ctx
 }
 
+// embedModelCmd is the parent for model-lifecycle subcommands. No RunE:
+// invoking `unictx embed model` without a subcommand prints cobra help.
+var embedModelCmd = &cobra.Command{
+	Use:   "model",
+	Short: "Manage embedding models (add/list/remove)",
+}
+
+// Flags for `embed model add`.
+var (
+	modelAddProvider string
+	modelAddBaseURL  string
+	modelAddDim      int
+	modelAddAPIKey   string
+)
+
+var embedModelAddCmd = &cobra.Command{
+	Use:   "add <slug>",
+	Short: "Register a new embedding model (creates its vec table)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadApp()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.Registry == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		slug := args[0]
+		return a.Registry.Register(cmd.Context(), port.ModelSpec{
+			Slug:      slug,
+			Provider:  modelAddProvider,
+			BaseURL:   modelAddBaseURL,
+			APIKey:    modelAddAPIKey,
+			Dimension: modelAddDim,
+		})
+	},
+}
+
+var embedModelListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all registered embedding models",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadApp()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.Registry == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		models, err := a.Registry.List(cmd.Context())
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "SLUG\tPROVIDER\tDIM\tVEC_TABLE\tDEFAULT\tSTATUS")
+		for _, m := range models {
+			defaultMark := ""
+			if m.IsDefault {
+				defaultMark = "*"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
+				m.Slug, m.Provider, m.Dimension, m.VecTable, defaultMark, m.Status)
+		}
+		return w.Flush()
+	},
+}
+
+var embedModelRemoveCmd = &cobra.Command{
+	Use:   "remove <slug>",
+	Short: "Drop a model's vec table + delete its row (refuses default + shared)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		a, _, err := loadApp()
+		if err != nil {
+			return err
+		}
+		defer a.DB.Close()
+		if a.Registry == nil {
+			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
+		}
+
+		return a.Registry.Remove(cmd.Context(), args[0])
+	},
+}
+
 func init() {
 	embedBackfillCmd.Flags().IntVar(&backfillLimit, "limit", 0,
 		"max items to embed (0 = no limit)")
@@ -108,7 +201,21 @@ func init() {
 	embedWorkerCmd.Flags().DurationVar(&workerInterval, "interval", 30*time.Second,
 		"poll interval for failed-embedding retries")
 
+	embedModelAddCmd.Flags().StringVar(&modelAddProvider, "provider", "",
+		"embedder provider (ollama|openai)")
+	embedModelAddCmd.Flags().StringVar(&modelAddBaseURL, "base-url", "",
+		"embedder base URL (e.g. http://localhost:11434 or https://api.openai.com/v1)")
+	embedModelAddCmd.Flags().IntVar(&modelAddDim, "dim", 0,
+		"embedding dimension (must match the model's output dim)")
+	embedModelAddCmd.Flags().StringVar(&modelAddAPIKey, "api-key", "",
+		"API key (required for OpenAI hosted; local servers ignore)")
+
+	embedModelCmd.AddCommand(embedModelAddCmd)
+	embedModelCmd.AddCommand(embedModelListCmd)
+	embedModelCmd.AddCommand(embedModelRemoveCmd)
+
 	embedCmd.AddCommand(embedBackfillCmd)
 	embedCmd.AddCommand(embedWorkerCmd)
+	embedCmd.AddCommand(embedModelCmd) // Plan 2c
 	rootCmd.AddCommand(embedCmd)
 }
