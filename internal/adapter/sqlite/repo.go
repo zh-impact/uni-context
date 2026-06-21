@@ -157,6 +157,18 @@ func (r *ContextRepo) List(ctx context.Context, f port.ItemFilter) ([]domain.Con
 		where = append(where, "any_embedding = ?")
 		args = append(args, *f.AnyEmbedding)
 	}
+	if f.NotDoneForModel != "" {
+		// Plan 2c: ReembedService wants items that lack a status='done'
+		// row for the active model. NOT EXISTS preserves the existing
+		// query plan; rewriting as JOIN would risk changing it.
+		where = append(where, `NOT EXISTS (
+            SELECT 1 FROM context_embedding ce
+            WHERE ce.item_id = context_item.id
+              AND ce.model_slug = ?
+              AND ce.status = 'done'
+        )`)
+		args = append(args, f.NotDoneForModel)
+	}
 	if f.Cursor != "" {
 		ts, id, err := decodeCursor(f.Cursor)
 		if err != nil {

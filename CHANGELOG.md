@@ -222,6 +222,63 @@ plan and `.superpowers/sdd/progress.md` for execution notes.
 - `unictx embed status <id>` (read-only status inspection)
 - True async ingest queue (goroutine + channel, return immediately)
 
+## Plan 2c — Multi-Model Registry & Migration (2026-06-21)
+
+Replaces the Plan 2a `EnsureModelRegistered` placeholder with a runtime
+model registry. Adds CLI commands for model lifecycle and migration.
+On first Plan 2c run, `config.Embedder.Model` seeds the registry via
+`reconcilePlan2cSync`; thereafter `embedding_model.is_default` is
+authoritative, and only `embed switch` can change the active model. See
+`docs/superpowers/specs/2026-06-21-plan-2c-multi-model-registry-design.md`
+for the design.
+
+**What shipped:**
+- **`port.ModelRegistry` + sqlite impl:** add/get/list/default/update/
+  remove with transactional DDL for per-slug `vec_<slug>_<dim>` tables.
+  Shared-table protection preserves Plan 2b alias rows.
+- **`unictx embed model add/list/remove`:** CLI surface for the registry.
+- **`unictx embed switch <slug>`:** atomic is_default flip; prints a stderr
+  reminder to follow with `embed reembed`.
+- **`unictx embed reembed [--limit N] [--dry-run]`:** bulk re-embed items
+  lacking a status='done' row for the active model. Reuses Plan 2b's
+  status mechanism; resumable.
+- **`service.ReembedService`:** Plan 2c sibling of BackfillService with a
+  different filter (`NotDoneForModel` vs `AnyEmbedding=0`).
+- **`app.Wire` reconciliation:** first Plan 2c run heals/registers the
+  active model from `cfg.Embedder`, gated by
+  `schema_meta.plan_2c_synced`. Subsequent runs trust the DB; the only
+  way to change the active model is `embed switch`.
+
+### Known Limitations (Plan 2c)
+
+1. **API keys persist in `embedding_model.config` JSON.** The DB file
+   contains them in plaintext. Set `unictx.db` permissions to 0600 on
+   shared systems. OS keychain integration is a future plan.
+
+2. **Only one active model at a time.** Parallel embedding (N models per
+   item) is Plan 2d. Adding a model + switching requires `embed reembed`
+   before vector search returns hits for existing items.
+
+3. **`embed model remove` refuses shared vec_tables.** Plan 2b alias
+   rows can share a vec_table with the seed; the registry detects this
+   and errors out, requiring dependents to be removed first.
+
+4. **Reconciliation runs once.** After `plan_2c_synced=1` is set, editing
+   `embedder.model` in config has no effect. Use `embed switch`.
+
+5. **Migration transition state.** Between `embed switch` and
+   `embed reembed` completing, vector search returns 0 hits for the new
+   model (SearchService hybrid mode falls back to fts-only gracefully).
+
+### Deferred to Plan 2d+
+
+- Parallel embedding (N models per item)
+- Per-call model parameter on `EmbedService.Embed`
+- Provider auto-detection (probe `/v1/models` endpoint)
+- OpenAI batched embeddings API (1 request, N inputs)
+- `unictx embed status <id>` (read-only status inspection)
+- Migrating Plan 2b alias rows to per-slug vec tables
+
 ## Bugfix — OpenAI adapter string-error tolerance (2026-06-21)
 
 Plan 2b verification surfaced a real adapter bug: LMStudio (and likely

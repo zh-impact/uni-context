@@ -62,7 +62,9 @@ Plan 2c closes all three by introducing a runtime model registry with proper per
     → 拒绝 is_default=1 的（要求先 switch 走）
     → 拒绝 vec_table 被其他 slug 引用的（防止误删共享表）
     → DROP TABLE vec_<slug>_<dim>; DELETE embedding_model row
-    → context_embedding 行靠 FK ON DELETE CASCADE 自动清
+    → context_embedding 行由 Remove 实现里的 explicit DELETE 清理
+      （migration 0002 的 FK 没有 ON DELETE CASCADE，默认 RESTRICT；
+       explicit DELETE 是强制的，否则 embedding_model 行删除会被 FK 拒绝）
 ```
 
 ### Key principles
@@ -125,7 +127,7 @@ Replaces the `EnsureModelRegistered` placeholder. Implementation notes:
 - `SetDefault`: `BEGIN; UPDATE ... SET is_default=1 WHERE slug=?; UPDATE ... SET is_default=0 WHERE slug<>?; COMMIT`.
 - `Remove`:
   - Pre-checks (outside tx): slug exists; slug not is_default=1; `SELECT COUNT(*) FROM embedding_model WHERE vec_table = ?` ≤ 1 (reject if shared).
-  - Tx: `DROP TABLE <vecTable>` + `DELETE FROM embedding_model WHERE slug=?`. FK ON DELETE CASCADE cleans `context_embedding` rows.
+  - Tx: `DROP TABLE <vecTable>` + `DELETE FROM context_embedding WHERE model_slug=?` + `DELETE FROM embedding_model WHERE slug=?`. The middle DELETE is **mandatory**: migration 0002 declares `context_embedding.model_slug REFERENCES embedding_model(slug)` with no `ON DELETE` clause, so the FK is RESTRICT by default and the embedding_model row delete would raise a FK constraint violation without it. (Forward-compat: migration 0004 could add `ON DELETE CASCADE` to formalize the contract; the explicit DELETE would then be redundant but harmless.)
 - `GetActive` / `Get` / `List`: SELECT + scan into ModelDescriptor, parsing config JSON for BaseURL + APIKey.
 - `dashToUnderscore("text-embedding-3-large")` → `"text_embedding_3_large"` → vec table `vec_text_embedding_3_large_3072`.
 
@@ -350,9 +352,12 @@ $ unictx embed model remove bge-m3
          error "vec table <name> shared by N models; remove dependents first".
     4. BEGIN;
          DROP TABLE <vec_table>;
+         DELETE FROM context_embedding WHERE model_slug='bge-m3';
          DELETE FROM embedding_model WHERE slug='bge-m3';
        COMMIT;
-       -- context_embedding rows for bge-m3 cascade-deleted via FK.
+       -- context_embedding rows deleted explicitly (FK is RESTRICT in
+       -- migration 0002; no ON DELETE CASCADE). The explicit DELETE is
+       -- mandatory — without it the next statement raises FK violation.
 ```
 
 ## Error handling

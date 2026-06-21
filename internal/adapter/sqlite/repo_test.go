@@ -156,6 +156,42 @@ func TestContextRepo_ListWithTagsFilter(t *testing.T) {
 	assert.Empty(t, items)
 }
 
+func TestContextRepo_List_NotDoneForModel(t *testing.T) {
+	// Plan 2c: the NotDoneForModel filter excludes items that have a
+	// status='done' row in context_embedding for the given model slug.
+	// This is the entire reason ReembedService exists vs BackfillService.
+	repo, db := setupRepo(t)
+	ctx := context.Background()
+	embRepo := NewEmbeddingRepo(db)
+
+	item1 := newItem(t, domain.ScopeUser, domain.KindNote, domain.SourceManual)
+	item2 := newItem(t, domain.ScopeUser, domain.KindNote, domain.SourceManual)
+	require.NoError(t, repo.Create(ctx, item1))
+	require.NoError(t, repo.Create(ctx, item2))
+
+	// item1 done under active-model; item2 done under a different model.
+	require.NoError(t, embRepo.UpsertStatus(ctx, item1.ID, "active-model", "done", ""))
+	require.NoError(t, embRepo.UpsertStatus(ctx, item2.ID, "bge-m3", "done", ""))
+
+	// Only item2 lacks a done row for active-model.
+	items, _, err := repo.List(ctx, port.ItemFilter{
+		NotDoneForModel: "active-model",
+		Limit:           50,
+	})
+	require.NoError(t, err)
+	require.Len(t, items, 1, "only item2 should pass the filter")
+	assert.Equal(t, item2.ID, items[0].ID)
+
+	// Flip item1 to failed under active-model — both items now pass.
+	require.NoError(t, embRepo.UpsertStatus(ctx, item1.ID, "active-model", "failed", "transient"))
+	items, _, err = repo.List(ctx, port.ItemFilter{
+		NotDoneForModel: "active-model",
+		Limit:           50,
+	})
+	require.NoError(t, err)
+	assert.Len(t, items, 2, "failed status does not exclude; both items returned")
+}
+
 func TestContextRepo_CursorPagination(t *testing.T) {
 	repo, _ := setupRepo(t)
 	ctx := context.Background()
