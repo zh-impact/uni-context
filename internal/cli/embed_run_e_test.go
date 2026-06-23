@@ -46,11 +46,16 @@ func TestEmbedModelAddCmd_RunECallsRegistryRegister(t *testing.T) {
 	restore := swapLoadAppFn(a)
 	defer restore()
 
-	// Reset flags from any prior test (package-global state).
-	modelAddProvider = "openai"
-	modelAddBaseURL = "https://api.openai.com/v1"
-	modelAddAPIKey = "sk-test"
-	modelAddDim = 3072
+	// Set required flags via pflag's Set API, not direct var assignment.
+	// Cobra's MarkFlagRequired validation checks flag.Changed, not the
+	// bound var's value — direct assignment leaves Changed=false and trips
+	// the validation with "required flag(s) not set". Flags().Set updates
+	// both the var (via the StringVar pointer) and the Changed bit,
+	// mirroring `--provider openai --dim 3072` at the CLI.
+	require.NoError(t, embedModelAddCmd.Flags().Set("provider", "openai"))
+	require.NoError(t, embedModelAddCmd.Flags().Set("base-url", "https://api.openai.com/v1"))
+	require.NoError(t, embedModelAddCmd.Flags().Set("api-key", "sk-test"))
+	require.NoError(t, embedModelAddCmd.Flags().Set("dim", "3072"))
 	t.Cleanup(func() {
 		modelAddProvider, modelAddBaseURL, modelAddAPIKey, modelAddDim = "", "", "", 0
 	})
