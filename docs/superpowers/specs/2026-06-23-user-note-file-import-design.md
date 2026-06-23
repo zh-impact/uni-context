@@ -58,10 +58,13 @@ The flag is reset between test runs via the `t.Cleanup` pattern established in `
 
 | # | Condition | Error |
 |---|---|---|
+| 0 | `cmd.Flags().Changed("file")` AND `noteFilePath == ""` | `"--file: path cannot be empty"` |
 | 1 | `--file` set AND `len(args) > 0` | `"cannot combine --file with positional content or -"` |
 | 2 | File does not exist | wrapped `os.Stat` error: `"stat file: <err>"` |
 | 3 | File is not a regular file (directory, socket, device) | `"not a regular file: <path>"` |
 | 4 | File size > 10 MB | `"file too large: <N> bytes (max 10485760)"` |
+
+Rule 0 is needed because `--file ""` would otherwise fall through to `readContent(args)` (since `noteFilePath != ""` is false), hit the zero-args branch, and surface `"content required (positional arg or - for stdin)"` — an error that has nothing to do with what the user typed. `Flags().Changed("file")` distinguishes "user passed --file with empty value" from "user didn't pass --file at all".
 
 `os.Stat` runs BEFORE `os.ReadFile` so a 12 MB file is rejected without ever allocating a 12 MB buffer.
 
@@ -226,6 +229,7 @@ Existing flow at `internal/cli/user_note.go:125-132` already handles both cases:
 
 | Scenario | Behavior |
 |---|---|
+| `--file ""` (explicitly empty) | Exit 1: `"--file: path cannot be empty"` (Rule 0; without it the user would see a misleading "content required" error) |
 | `--file foo.txt` + positional content or `-` | Exit 1: `"cannot combine --file with positional content or -"` (any non-zero arg count trips this) |
 | `--file /nonexistent/path` | Exit 1: `"stat file: stat /nonexistent/path: no such file or directory"` |
 | `--file /some/directory` | Exit 1: `"not a regular file: /some/directory"` |
@@ -279,11 +283,12 @@ The helpers are extracted as named functions (`mimeForTextFile`, `deriveDefaultT
 
 ### Validation unit tests (same file)
 
+- `TestValidateFileImport_EmptyPathWhenFlagChanged` — `Changed("file")=true`, `noteFilePath=""` → `"--file: path cannot be empty"`. Requires the test to set the flag via `cmd.Flags().Set("file", "")` (or equivalent) so `Changed("file")` returns true; merely assigning `noteFilePath = ""` would not exercise Rule 0.
 - `TestValidateFilePath_NotExisting` — `--file /no/such` → error contains `"stat file:"`.
 - `TestValidateFilePath_Directory` — `--file /tmp` (or `t.TempDir()`) → `"not a regular file"`.
 - `TestValidateFileSize_TooLarge` — fixture file > cap (use `t.TempDir` + write N+1 bytes) → `"file too large"`.
 
-These wrap the validation rules in a small unexported `validateFileImport(path string) (size int64, err error)` helper, again for direct testability.
+These wrap the validation rules in a small unexported `validateFileImport(path string) (size int64, err error)` helper, again for direct testability. Rule 0's `Changed("file")` check is performed in RunE before calling `validateFileImport` (the helper only sees a non-empty path).
 
 ### Service tests (`internal/service/ingest_test.go` — append)
 
