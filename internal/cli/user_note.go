@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -247,4 +248,64 @@ func previewRunes(s string, n int) string {
 		return s
 	}
 	return string(runes[:n]) + "…"
+}
+
+// maxFileBytes is the file import size cap. Enforced via os.Stat before
+// os.ReadFile so a rejected file never allocates a buffer. 10 MB is a
+// guardrail against accidentally loading huge files, not a security boundary.
+const maxFileBytes int64 = 10 * 1024 * 1024
+
+// mimeForTextFile maps a small set of text file extensions to MIME types.
+// Unknown extensions default to text/plain — binary support is out of scope.
+// Case-insensitive via strings.ToLower so weekly.MD is still markdown.
+// Adding new text types later (.org, .rst) is a one-liner here.
+func mimeForTextFile(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		return "text/markdown"
+	default:
+		return "text/plain"
+	}
+}
+
+// deriveDefaultTitle extracts a human-friendly title from a file path by
+// taking the basename and stripping the last extension. Used when the user
+// runs `--file weekly.md` without `--title`. Only the last extension is
+// stripped (archive.tar.gz → "archive.tar") to match user intuition.
+// A leading-dot file (.bashrc) keeps its full basename (dot at index 0
+// is not stripped).
+func deriveDefaultTitle(path string) string {
+	base := filepath.Base(path)
+	if dot := strings.LastIndex(base, "."); dot > 0 {
+		base = base[:dot]
+	}
+	return base
+}
+
+// checkFileSize is a pure function so tests can sweep synthetic sizes
+// (0, at-cap, cap+1) without writing real fixtures to disk.
+func checkFileSize(size int64) error {
+	if size > maxFileBytes {
+		return fmt.Errorf("file too large: %d bytes (max %d)", size, maxFileBytes)
+	}
+	return nil
+}
+
+// validateFileImport runs the file-level validation rules (Rules 2-4 from
+// the spec): file must exist, be a regular file, and be within the size cap.
+// os.Stat runs before any os.ReadFile so oversized files are rejected
+// without allocating a buffer. Rule 0 (empty path) and Rule 1 (mutual
+// exclusion with positional args) are handled in RunE before this helper.
+func validateFileImport(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", path)
+	}
+	if err := checkFileSize(info.Size()); err != nil {
+		return err
+	}
+	return nil
 }

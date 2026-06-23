@@ -1,10 +1,15 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"uni-context/internal/domain"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // formatListItem governs the `user note list` row format. The most important
@@ -17,9 +22,9 @@ func TestFormatListItem(t *testing.T) {
 	base := domain.ContextItem{ID: "abc123"}
 
 	tests := []struct {
-		name  string
-		item  domain.ContextItem
-		want  string
+		name string
+		item domain.ContextItem
+		want string
 	}{
 		{
 			name: "title present wins over content",
@@ -71,11 +76,11 @@ func TestPreviewRunes(t *testing.T) {
 		n    int
 		want string
 	}{
-		{"abc", 5, "abc"},          // shorter than n: verbatim
-		{"abcdef", 3, "abc…"},      // ascii truncate
-		{"你好世界", 2, "你好…"},     // CJK truncate, no byte-misalignment
-		{"", 5, ""},                // empty input
-		{"abc", 3, "abc"},          // exact-length: no ellipsis
+		{"abc", 5, "abc"},     // shorter than n: verbatim
+		{"abcdef", 3, "abc…"}, // ascii truncate
+		{"你好世界", 2, "你好…"},    // CJK truncate, no byte-misalignment
+		{"", 5, ""},           // empty input
+		{"abc", 3, "abc"},     // exact-length: no ellipsis
 	}
 	for _, tc := range tests {
 		got := previewRunes(tc.s, tc.n)
@@ -83,4 +88,86 @@ func TestPreviewRunes(t *testing.T) {
 			t.Errorf("previewRunes(%q, %d): got %q, want %q", tc.s, tc.n, got, tc.want)
 		}
 	}
+}
+
+func TestMimeForTextFile(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"notes.txt", "text/plain"},
+		{"weekly.md", "text/markdown"},
+		{"weekly.markdown", "text/markdown"},
+		{"weekly.MD", "text/markdown"}, // case-insensitive
+		{"weekly.Markdown", "text/markdown"},
+		{"notes.org", "text/plain"}, // unknown → default
+		{"noext", "text/plain"},     // no extension
+		{".bashrc", "text/plain"},   // leading-dot, no real ext
+		{"/abs/path/weekly.md", "text/markdown"},
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			assert.Equal(t, c.want, mimeForTextFile(c.path))
+		})
+	}
+}
+
+func TestDeriveDefaultTitle(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"weekly.md", "weekly"},
+		{"notes.txt", "notes"},
+		{"noext", "noext"},
+		{".bashrc", ".bashrc"},            // dot at index 0; guard prevents stripping
+		{"archive.tar.gz", "archive.tar"}, // only last ext stripped
+		{"/abs/path/notes.md", "notes"},   // basename only
+		{"weekly.MD", "weekly"},           // case-insensitive ext stripped
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			assert.Equal(t, c.want, deriveDefaultTitle(c.path))
+		})
+	}
+}
+
+func TestCheckFileSize(t *testing.T) {
+	cases := []struct {
+		name    string
+		size    int64
+		wantErr string // empty = nil expected
+	}{
+		{"zero bytes", 0, ""},
+		{"one byte", 1, ""},
+		{"at cap", maxFileBytes, ""},
+		{"cap plus one", maxFileBytes + 1, "file too large"},
+		{"ten MB plus one thousand", maxFileBytes + 1000, "file too large"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := checkFileSize(c.size)
+			if c.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), c.wantErr)
+				assert.Contains(t, err.Error(), "max 10485760")
+			}
+		})
+	}
+}
+
+func TestValidateFileImport_NotExisting(t *testing.T) {
+	err := validateFileImport(filepath.Join(t.TempDir(), "nope.txt"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stat file:")
+}
+
+func TestValidateFileImport_Directory(t *testing.T) {
+	dir := t.TempDir()
+	err := validateFileImport(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+func TestValidateFileImport_SmallFileOK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ok.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello"), 0o644))
+	err := validateFileImport(path)
+	assert.NoError(t, err)
 }
