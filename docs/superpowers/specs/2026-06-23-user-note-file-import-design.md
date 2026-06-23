@@ -52,7 +52,56 @@ userNoteAddCmd.Flags().StringVar(&noteFilePath, "file", "", "import content from
 
 The flag is reset between test runs via the `t.Cleanup` pattern established in `embed_status_test.go` (e.g. `t.Cleanup(func() { noteFilePath = "" })`). RunE-level tests that touch `noteTitle`/`noteTags` reset those too.
 
-`userNoteAddCmd.RunE` reshapes to handle three input modes: positional text, `-` stdin, `--file <path>`. The validation rules below enforce mutual exclusion.
+`userNoteAddCmd.RunE` reshapes to handle three input modes: positional text, `-` stdin, `--file <path>`. The top-level branch keys off `noteFilePath` — when set, the RunE must **not** call `readContent(args)`, otherwise the zero-positional-args check inside `readContent` fires and masks the real `--file` validation errors:
+
+```go
+RunE: func(cmd *cobra.Command, args []string) error {
+    if cmd.Flags().Changed("file") && noteFilePath == "" {
+        return fmt.Errorf("--file: path cannot be empty") // Rule 0
+    }
+    var content string
+    var mime string
+    sourceMeta := map[string]any{}
+    if noteFilePath != "" {
+        if len(args) > 0 { // Rule 1
+            return fmt.Errorf("cannot combine --file with positional content or -")
+        }
+        size, err := validateFileImport(noteFilePath) // Rules 2-4
+        if err != nil { return err }
+        data, err := os.ReadFile(noteFilePath)
+        if err != nil { return fmt.Errorf("read file: %w", err) }
+        _ = size // already validated; silence unused if needed
+        content = string(data)
+        mime = mimeForTextFile(noteFilePath)
+        if !cmd.Flags().Changed("title") {
+            noteTitle = deriveDefaultTitle(noteFilePath)
+        }
+        sourceMeta["original_filename"] = filepath.Base(noteFilePath)
+    } else {
+        // Existing path: positional arg OR "-" stdin. Unchanged.
+        c, err := readContent(args)
+        if err != nil { return err }
+        content = c
+    }
+    a, cfg, err := userNoteLoadAppFn()
+    if err != nil { return err }
+    defer a.Close()
+    id, err := a.Ingest.Create(cmd.Context(), service.Input{
+        Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+        OwnerUserID: cfg.User.ID, Title: noteTitle, Content: content,
+        Tags: noteTags, MIME: mime, SourceMeta: sourceMeta,
+    })
+    if err != nil { return err }
+    // ... existing print/JSON logic unchanged ...
+}
+```
+
+Notes for the implementer:
+- The `noteFilePath != ""` branch bypasses `readContent` entirely; the existing positional/stdin path is the `else` branch, preserving all current behavior byte-for-byte.
+- `service.Input` is constructed inline rather than via `inputFromFlags` (per Components #4). The existing `inputFromFlags` helper stays for any other caller; today it has none, but removing it is out of scope.
+- `_ = size` is shown only because `validateFileImport` returns the stat size for completeness; the RunE doesn't need it after validation. If the implementer prefers, `validateFileImport` can return just `error`.
+
+The validation rules below enforce mutual exclusion and file constraints.
 
 **Validation rules (in order):**
 
