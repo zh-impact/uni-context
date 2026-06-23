@@ -51,7 +51,7 @@ func (r *capturingRepo) Update(_ context.Context, item domain.ContextItem) (doma
 func (r *capturingRepo) Delete(_ context.Context, id string) error {
 	panic("unexpected Delete call in RunE test")
 }
-func (r *capturingRepo) List(_ context.Context, f port.ItemFilter) ([]domain.ContextItem, string, error) {
+func (r *capturingRepo) List(_ context.Context, _ port.ItemFilter) ([]domain.ContextItem, string, error) {
 	panic("unexpected List call in RunE test")
 }
 func (r *capturingRepo) NextCursor(_ domain.ContextItem) string { panic("unexpected NextCursor") }

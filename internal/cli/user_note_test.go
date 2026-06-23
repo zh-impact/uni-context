@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,7 +147,7 @@ func TestCheckFileSize(t *testing.T) {
 			} else {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), c.wantErr)
-				assert.Contains(t, err.Error(), "max 10485760")
+				assert.Contains(t, err.Error(), fmt.Sprintf("max %d", maxFileBytes))
 			}
 		})
 	}

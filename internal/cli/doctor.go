@@ -30,11 +30,15 @@ var doctorCmd = &cobra.Command{
 
 		// Embedder check: when configured, exercise the live service with
 		// a one-token embed. Otherwise report Plan 1 mode so users can see
-		// why hybrid search is unavailable.
+		// why hybrid search is unavailable. A failed check flips the
+		// overall status to FAIL and surfaces a non-zero exit so scripts
+		// and CI can detect the broken state.
+		var checkErr error
 		if a.Embedder != nil {
 			_, err := a.Embedder.Embed(cmd.Context(), []string{"ping"})
 			if err != nil {
 				fmt.Printf("  embedder: FAIL (%v)\n", err)
+				checkErr = fmt.Errorf("embedder check failed: %w", err)
 			} else {
 				info := a.Embedder.Model()
 				fmt.Printf("  embedder: OK (%s, %d-dim)\n", info.Slug, info.Dimension)
@@ -43,6 +47,10 @@ var doctorCmd = &cobra.Command{
 			fmt.Println("  embedder: disabled (Plan 1 mode; set embedder.enabled=true to enable)")
 		}
 
+		if checkErr != nil {
+			fmt.Println("status:         FAIL (see above)")
+			return checkErr
+		}
 		fmt.Println("status:         OK")
 		return nil
 	},

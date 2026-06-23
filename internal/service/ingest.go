@@ -110,14 +110,14 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 		return "", fmt.Errorf("persist item: %w", err)
 	}
 
-	// Plan 2a: synchronous embed after the item is durably persisted.
-	// Embedding failure is non-fatal — the item is already saved and
-	// FTS-searchable. Warn to stderr; future Plan 2b async queue will
-	// retry. any_embedding stays 0, which SearchService treats as
-	// "not vector-searchable" (correct).
+	// Synchronous embed after the item is durably persisted. Embedding
+	// failure is non-fatal — the item is already saved and FTS-searchable,
+	// and the async worker (Plan 2b) will retry on its next iteration.
+	// any_embedding stays 0 until the worker flips it; SearchService
+	// treats 0 as "not vector-searchable" (correct).
 	//
-	// Plan 2b: pass item.Content directly. For externalized items this is
-	// "" and EmbedService hydrates from FileStore via item.ContentURI.
+	// For externalized items, item.Content is "" here and EmbedService
+	// hydrates from FileStore via item.ContentURI.
 	if s.embed != nil {
 		if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: embed failed for %s: %v\n", item.ID, err)

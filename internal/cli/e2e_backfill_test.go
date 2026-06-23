@@ -127,8 +127,9 @@ func TestE2E_BackfillRecoversFromIngestFailure(t *testing.T) {
 	go func() { done <- workerCmd.Wait() }()
 	select {
 	case <-time.After(5 * time.Second):
-		// Time's up — kill the worker. SIGTERM first for graceful path;
-		// if that doesn't land, the test still asserts on DB state.
+		// Time's up — kill the worker. SIGINT first for graceful path
+		// (worker subscribes to both SIGINT and SIGTERM); if that doesn't
+		// land, the test still asserts on DB state.
 		_ = workerCmd.Process.Signal(os.Interrupt)
 		select {
 		case <-done:

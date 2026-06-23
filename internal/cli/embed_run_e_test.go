@@ -153,7 +153,7 @@ func TestEmbedSwitchCmd_RunECallsRegistrySetDefault(t *testing.T) {
 // TestEmbedSwitchCmd_RunENilRegistryErrorsCleanly: when embedder.enabled
 // is false, App.Registry is nil and the RunE handler must return the
 // friendly "embedder not enabled" error rather than nil-pointer panic.
-// newStubApp gives the handler a non-nil DB so the defer a.DB.Close()
+// newStubApp gives the handler a non-nil DB so the defer a.Close()
 // (which registers BEFORE the nil-Registry check) does not panic when
 // the handler returns from the early-exit branch.
 func TestEmbedSwitchCmd_RunENilRegistryErrorsCleanly(t *testing.T) {
