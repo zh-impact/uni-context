@@ -30,27 +30,74 @@ var (
 	noteTags       []string
 	noteTagsFilter []string
 	noteLimit      int
+	noteFilePath   string
 )
+
+// userNoteLoadAppFn is the indirection that lets RunE tests swap in a
+// stubbed *App without touching the real config/DB. Separate from
+// embed.go's loadAppFn so each command file's tests are scoped to its
+// own var. Defaults to the real loadApp in production.
+var userNoteLoadAppFn = loadApp
 
 var userNoteAddCmd = &cobra.Command{
 	Use:   "add [content|-]",
 	Short: "Add a personal note. Pass - to read content from stdin.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		content, err := readContent(args)
-		if err != nil {
-			return err
+		// Rule 0: --file "" (explicit empty) must not fall through to
+		// readContent(args), which would surface the misleading
+		// "content required (positional arg or - for stdin)".
+		if cmd.Flags().Changed("file") && noteFilePath == "" {
+			return fmt.Errorf("--file: path cannot be empty")
 		}
-		a, cfg, err := loadApp()
+
+		var content string
+		var mime string
+		sourceMeta := map[string]any{}
+		if noteFilePath != "" {
+			// File import path.
+			if len(args) > 0 { // Rule 1: mutual exclusion
+				return fmt.Errorf("cannot combine --file with positional content or -")
+			}
+			if err := validateFileImport(noteFilePath); err != nil { // Rules 2-4
+				return err
+			}
+			data, err := os.ReadFile(noteFilePath)
+			if err != nil {
+				return fmt.Errorf("read file: %w", err)
+			}
+			content = string(data)
+			mime = mimeForTextFile(noteFilePath)
+			if !cmd.Flags().Changed("title") {
+				noteTitle = deriveDefaultTitle(noteFilePath)
+			}
+			sourceMeta["original_filename"] = filepath.Base(noteFilePath)
+		} else {
+			// Existing path: positional arg OR "-" stdin. Unchanged.
+			c, err := readContent(args)
+			if err != nil {
+				return err
+			}
+			content = c
+		}
+
+		a, cfg, err := userNoteLoadAppFn()
 		if err != nil {
 			return err
 		}
 		defer a.Close()
 
-		id, err := a.Ingest.Create(cmd.Context(), inputFromFlags(
-			domain.ScopeUser, domain.KindNote, domain.SourceManual,
-			cfg.User.ID, "", noteTitle, content, noteTags,
-		))
+		id, err := a.Ingest.Create(cmd.Context(), service.Input{
+			Scope:       domain.ScopeUser,
+			Kind:        domain.KindNote,
+			Source:      domain.SourceManual,
+			OwnerUserID: cfg.User.ID,
+			Title:       noteTitle,
+			Content:     content,
+			Tags:        noteTags,
+			MIME:        mime,
+			SourceMeta:  sourceMeta,
+		})
 		if err != nil {
 			return err
 		}
@@ -177,6 +224,7 @@ var userNoteDeleteCmd = &cobra.Command{
 func init() {
 	userNoteAddCmd.Flags().StringVar(&noteTitle, "title", "", "note title")
 	userNoteAddCmd.Flags().StringSliceVar(&noteTags, "tag", nil, "tags (comma-separated or repeat)")
+	userNoteAddCmd.Flags().StringVar(&noteFilePath, "file", "", "import content from a file (text only)")
 	userNoteListCmd.Flags().StringSliceVar(&noteTagsFilter, "tag", nil, "filter by tag (OR semantics; comma-separated or repeat)")
 	userNoteListCmd.Flags().IntVar(&noteLimit, "limit", 20, "max items to return")
 
