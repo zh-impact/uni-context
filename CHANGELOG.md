@@ -376,3 +376,40 @@ the FTS5 trigram tokenizer requires queries of at least 3 runes.
 Verified with 4 new searcher tests: short CJK match, short ASCII match,
 wildcard escaping, and a regression guard that 3+ rune queries still
 produce non-empty snippets via the FTS path.
+
+
+## Bugfix — Externalized content unsearchable via FTS (2026-06-23)
+
+When an item's content exceeded `domain.ContentInlineLimit` (4KB) it was
+externalized to FileStore with `item.Content=""`. The AFTER INSERT trigger
+on `context_item` reads `new.content` when writing the FTS row, so the
+FTS index captured `""` and `search "<keyword>"` returned 0 hits even
+when the keyword existed in the externalized file. Embeddings were
+unaffected — Plan 2b's `EmbedService` hydrates from FileStore — making the
+bug FTS-specific and easy to miss.
+
+**What shipped** (commit `3159020`, on `main` 2026-06-23):
+- New `port.ContextRepo.ReindexFTS(ctx, id, title, summary, content)`
+  rewrites the FTS row via FTS5's delete-then-insert special-command
+  pattern (external-content tables cannot be UPDATEd). Idempotent.
+- `IngestService.Create` calls `ReindexFTS` after a successful
+  `repo.Create` when `item.ContentURI != ""`, rewriting the FTS row with
+  the in-memory `in.Content` before it goes out of scope. Failure is
+  non-fatal — the item is already saved; `unictx reindex-fts` can heal
+  it later.
+- New `service.ReindexFTSService` walks all items, hydrates externalized
+  content from FileStore, and calls `ReindexFTS`. Constructed
+  unconditionally in `app.Wire` (FTS is available in Plan 1 too).
+- New `unictx reindex-fts [--limit N] [--dry-run]` CLI command for
+  one-shot backfill of legacy data. Inline items are skipped (trigger
+  already handled them); failures are recorded per-item without aborting
+  the run.
+
+**Backfill applied to user data:** 2 externalized notes (a resume
+markdown and a long text note) were reindexed on 2026-06-23 via
+`unictx reindex-fts`. Both are now searchable by their content keywords.
+
+**Scope:** search-only fix. No schema change, no behavior change on the
+embed path. Verified with 2 new sqlite tests (externalized→searchable +
+idempotency), 1 new service integration test (verified the test fails
+without the fix), and 4 new service tests for the bulk runner.
