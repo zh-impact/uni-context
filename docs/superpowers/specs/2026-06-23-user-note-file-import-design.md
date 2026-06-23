@@ -333,11 +333,43 @@ The helpers are extracted as named functions (`mimeForTextFile`, `deriveDefaultT
 ### Validation unit tests (same file)
 
 - `TestValidateFileImport_EmptyPathWhenFlagChanged` — `Changed("file")=true`, `noteFilePath=""` → `"--file: path cannot be empty"`. Requires the test to set the flag via `cmd.Flags().Set("file", "")` (or equivalent) so `Changed("file")` returns true; merely assigning `noteFilePath = ""` would not exercise Rule 0.
-- `TestValidateFilePath_NotExisting` — `--file /no/such` → error contains `"stat file:"`.
-- `TestValidateFilePath_Directory` — `--file /tmp` (or `t.TempDir()`) → `"not a regular file"`.
-- `TestValidateFileSize_TooLarge` — fixture file > cap (use `t.TempDir` + write N+1 bytes) → `"file too large"`.
+- `TestValidateFileImport_NotExisting` — `validateFileImport("/no/such")` → error contains `"stat file:"`.
+- `TestValidateFileImport_Directory` — `validateFileImport(t.TempDir())` → `"not a regular file"`.
+- `TestCheckFileSize` — table-driven over the pure helper: `{0, nil}`, `{maxFileBytes, nil}` (at-cap allowed), `{maxFileBytes+1, "file too large"}`. No disk I/O — synthetic `int64` inputs.
 
-These wrap the validation rules in a small unexported `validateFileImport(path string) (size int64, err error)` helper, again for direct testability. Rule 0's `Changed("file")` check is performed in RunE before calling `validateFileImport` (the helper only sees a non-empty path).
+These wrap the validation rules in small unexported helpers, again for direct testability:
+
+```go
+const maxFileBytes int64 = 10 * 1024 * 1024 // 10 MB
+
+// checkFileSize is a pure function so tests can sweep synthetic sizes
+// (0, at-cap, cap+1) without writing real fixtures to disk.
+func checkFileSize(size int64) error {
+    if size > maxFileBytes {
+        return fmt.Errorf("file too large: %d bytes (max %d)", size, maxFileBytes)
+    }
+    return nil
+}
+
+// validateFileImport runs Rules 2-4. Returns the stat size for callers
+// that want it (RunE currently doesn't). Rule 0 (empty path) is handled
+// in RunE via Flags().Changed, not here.
+func validateFileImport(path string) (int64, error) {
+    info, err := os.Stat(path)
+    if err != nil {
+        return 0, fmt.Errorf("stat file: %w", err)
+    }
+    if !info.Mode().IsRegular() {
+        return 0, fmt.Errorf("not a regular file: %s", path)
+    }
+    if err := checkFileSize(info.Size()); err != nil {
+        return 0, err
+    }
+    return info.Size(), nil
+}
+```
+
+The size boundary is tested via `checkFileSize` directly with synthetic `int64` values — zero disk I/O, no 10 MB fixture. `validateFileImport` tests use small real fixtures under `t.TempDir()` for Rules 2-3 (nonexistent path, directory) and rely on `checkFileSize`'s unit tests for the boundary. Rule 0's `Changed("file")` check is performed in RunE before calling `validateFileImport`.
 
 ### Service tests (`internal/service/ingest_test.go` — append)
 
@@ -372,7 +404,7 @@ Tests added to a new `internal/cli/user_note_run_e_test.go`:
 
 - `TestUserNoteAddCmd_RunEWithFileImport_PreservesFilenameAndMIME` — small fixture `.md` file (under 4 KB, exercises the inline MIME-preservation path) under `t.TempDir()`, stub App wires a real `IngestService` against an in-memory repo + a temp-dir FileStore. Assert the created item has `SourceMeta["original_filename"]` set, `item.Content != ""` (inline), `item.ContentURI == ""`, and `ContentMIME == "text/markdown"`.
 - `TestUserNoteAddCmd_RunEFileFlagMutuallyExclusiveWithPositional` — `--file x.txt abc` → error contains `"cannot combine --file"`.
-- `TestUserNoteAddCmd_RunEFileFlagRejectsLargeFile` — fixture > 10 MB → `"file too large"`.
+- `TestUserNoteAddCmd_RunEPropagatesValidationError` — points `--file` at a nonexistent path under `t.TempDir()` (zero bytes written) and asserts the RunE surfaces the validator's `"stat file:"` error. This confirms RunE invokes `validateFileImport` and propagates its error without paying the disk cost of a large fixture. The actual `"file too large"` boundary is covered by `TestCheckFileSize` in the unit-test section, which tests the pure helper with synthetic `int64` values — no fixture file, no disk I/O.
 
 The `swapLoadAppFn`-equivalent helper for `userNoteLoadAppFn` lives in the new test file (mirroring `embed_status_test.go`'s `swapLoadAppFn`).
 
