@@ -37,6 +37,9 @@ func (f *fakeListRepo) List(ctx context.Context, f2 port.ItemFilter) ([]domain.C
 	return f.items, "", nil
 }
 func (f *fakeListRepo) NextCursor(item domain.ContextItem) string { return "" }
+func (f *fakeListRepo) ReindexFTS(_ context.Context, _, _, _, _ string) error {
+	panic("unexpected")
+}
 
 // embedSpy captures Embed calls so tests can assert behavior without a
 // real EmbedService. We can't substitute *EmbedService directly (concrete
@@ -211,6 +214,9 @@ func (r *getItemRepo) List(ctx context.Context, f port.ItemFilter) ([]domain.Con
 	return r.items, "", nil
 }
 func (r *getItemRepo) NextCursor(item domain.ContextItem) string { return "" }
+func (r *getItemRepo) ReindexFTS(_ context.Context, _, _, _, _ string) error {
+	panic("unexpected")
+}
 
 // fakeEmbedRepo mirrors the one in service/embed_test.go. If that file
 // already declares a conflicting name, rename this one.

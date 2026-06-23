@@ -39,6 +39,16 @@ type ContextRepo interface {
 	List(ctx context.Context, filter ItemFilter) ([]domain.ContextItem, string, error)
 	// NextCursor builds an opaque cursor from the last item returned.
 	NextCursor(item domain.ContextItem) string
+
+	// ReindexFTS rewrites the FTS row for the given item with the supplied
+	// title/summary/content. Used by IngestService when content was
+	// externalized (item.Content="" so the AFTER INSERT trigger captured
+	// an empty content column, making the item unsearchable via FTS).
+	//
+	// For inline items the trigger already handled indexing; calling
+	// ReindexFTS in that case is a harmless overwrite with the same values.
+	// Idempotent.
+	ReindexFTS(ctx context.Context, id, title, summary, content string) error
 }
 
 // ProjectRepo is the persistence port for Project.

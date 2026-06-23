@@ -110,6 +110,24 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 		return "", fmt.Errorf("persist item: %w", err)
 	}
 
+	// Externalized-content fix: the AFTER INSERT trigger on context_item
+	// wrote an FTS row reading new.content, which is "" for externalized
+	// items (bytes live in FileStore). Without this rewrite the item is
+	// silently unsearchable via FTS — `search "keyword"` returns 0 hits
+	// even when the keyword exists in the file. ReindexFTS rewrites the
+	// FTS row with the hydrated content. We still have in.Content in
+	// memory here; no FileStore round-trip needed.
+	//
+	// Non-fatal: if ReindexFTS fails, the item is already saved and the
+	// `unictx reindex-fts` CLI command can fix it later. The alternative
+	// (failing the whole Create) would punish the user for a search-only
+	// index bug, which doesn't match how we treat embed failures.
+	if item.ContentURI != "" {
+		if err := s.repo.ReindexFTS(ctx, item.ID, item.Title, item.Summary, in.Content); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: reindex fts for %s: %v\n", item.ID, err)
+		}
+	}
+
 	// Synchronous embed after the item is durably persisted. Embedding
 	// failure is non-fatal — the item is already saved and FTS-searchable,
 	// and the async worker (Plan 2b) will retry on its next iteration.

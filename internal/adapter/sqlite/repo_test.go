@@ -221,3 +221,57 @@ func TestContextRepo_CursorPagination(t *testing.T) {
 		seen[it.ID] = true
 	}
 }
+
+// TestContextRepo_ReindexFTS_MakesExternalizedContentSearchable locks in
+// the bug fix: when an item is created with empty content (the
+// externalized-content case — real bytes live in FileStore, not in the
+// content column), the AFTER INSERT trigger writes empty content to
+// context_fts and FTS search silently returns 0 results. ReindexFTS
+// rewrites the FTS row with the real content so search works.
+func TestContextRepo_ReindexFTS_MakesExternalizedContentSearchable(t *testing.T) {
+	repo, db := setupRepo(t)
+	ctx := context.Background()
+
+	item := newItem(t, domain.ScopeUser, domain.KindNote, domain.SourceManual)
+	item.Title = "部署文档"
+	item.Content = "" // simulate externalized content
+	require.NoError(t, repo.Create(ctx, item))
+
+	s := NewSearcher(db)
+
+	// Sanity: BEFORE ReindexFTS, search returns nothing because FTS
+	// captured empty content via the AFTER INSERT trigger.
+	hits, err := s.SearchFTS(ctx, port.SearchQuery{Query: "部署详细", Limit: 5})
+	require.NoError(t, err)
+	assert.Empty(t, hits, "externalized content should be unfindable before ReindexFTS")
+
+	// Reindex with the real (hydrated) content.
+	require.NoError(t, repo.ReindexFTS(ctx, item.ID, item.Title, item.Summary,
+		"这里是如何部署详细的步骤说明，包含部署文档和部署配置。"))
+
+	// AFTER ReindexFTS, FTS finds the item.
+	hits, err = s.SearchFTS(ctx, port.SearchQuery{Query: "部署详细", Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "ReindexFTS must make externalized content searchable")
+	assert.Equal(t, item.ID, hits[0].ID)
+}
+
+// TestContextRepo_ReindexFTS_Idempotent verifies that calling ReindexFTS
+// multiple times produces the same single FTS row (no duplicates).
+func TestContextRepo_ReindexFTS_Idempotent(t *testing.T) {
+	repo, db := setupRepo(t)
+	ctx := context.Background()
+
+	item := newItem(t, domain.ScopeUser, domain.KindNote, domain.SourceManual)
+	item.Content = ""
+	require.NoError(t, repo.Create(ctx, item))
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, repo.ReindexFTS(ctx, item.ID, item.Title, item.Summary, "unique searchable content"))
+	}
+
+	s := NewSearcher(db)
+	hits, err := s.SearchFTS(ctx, port.SearchQuery{Query: "unique searchable", Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, hits, 1, "ReindexFTS must not duplicate FTS rows on repeat calls")
+}

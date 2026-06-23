@@ -249,6 +249,9 @@ func (r *reembedListRepo) List(ctx context.Context, f port.ItemFilter) ([]domain
 	return r.items, "", nil
 }
 func (r *reembedListRepo) NextCursor(item domain.ContextItem) string { return "" }
+func (r *reembedListRepo) ReindexFTS(ctx context.Context, id, title, summary, content string) error {
+	panic("unexpected")
+}
 
 // reembedGetRepo: same shape but Get is the call exercised (EmbedService
 // hydrates via Get during Embed).
@@ -275,6 +278,9 @@ func (r *reembedGetRepo) List(ctx context.Context, f port.ItemFilter) ([]domain.
 	return r.items, "", nil
 }
 func (r *reembedGetRepo) NextCursor(item domain.ContextItem) string { return "" }
+func (r *reembedGetRepo) ReindexFTS(ctx context.Context, id, title, summary, content string) error {
+	panic("unexpected")
+}
 
 // noopVectorStore, emptyFileStore: identical to the helpers in
 // internal/service/reembed_test.go. Re-declared here because test helpers

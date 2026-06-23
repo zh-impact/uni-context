@@ -220,6 +220,45 @@ func (r *ContextRepo) NextCursor(item domain.ContextItem) string {
 	return encodeCursor(item.CreatedAt.Unix(), item.ID)
 }
 
+// reindexFTSSQL rewrites a single FTS row. SQLite's FTS5 external content
+// tables (context_fts has `content='context_item'`) cannot be UPDATEd
+// directly — the only way to change a row is the delete-then-insert
+// special-command pattern. The 'delete' row needs the SAME column values
+// that were originally inserted, so we SELECT them from context_item
+// (where the AFTER INSERT trigger wrote empty content for externalized
+// items). The replacement INSERT uses caller-supplied title/summary/
+// content (typically the hydrated bytes from FileStore).
+//
+// Both statements run in one Exec so they share a single implicit
+// transaction; if the delete succeeds but insert fails, FTS5 leaves the
+// row missing (caller can retry ReindexFTS — idempotent).
+const reindexFTSSQL = `
+INSERT INTO context_fts(context_fts, rowid, title, summary, content)
+SELECT 'delete', rowid, title, summary, content FROM context_item WHERE id = ?;
+INSERT INTO context_fts(rowid, title, summary, content)
+SELECT rowid, ?, ?, ? FROM context_item WHERE id = ?;
+`
+
+// ReindexFTS rewrites the context_fts row for the given item with the
+// supplied title/summary/content. Used to fix the gap where the AFTER
+// INSERT trigger captured empty content for externalized items.
+// Idempotent: the delete-then-insert pattern produces one row regardless
+// of how many times it runs.
+func (r *ContextRepo) ReindexFTS(ctx context.Context, id, title, summary, content string) error {
+	res, err := r.db.ExecContext(ctx, reindexFTSSQL, id, title, summary, content, id)
+	if err != nil {
+		return fmt.Errorf("reindex fts for %s: %w", id, err)
+	}
+	// The first statement (delete) is the one whose RowsAffected matters;
+	// if no rows matched the id, the item doesn't exist. ExecContext
+	// returns the sum across both statements, so a non-zero total means
+	// at least one statement touched a row.
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: item %s", domain.ErrNotFound, id)
+	}
+	return nil
+}
+
 // --- helpers ---
 
 func nullable(s string) any {

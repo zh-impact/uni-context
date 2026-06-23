@@ -55,6 +55,9 @@ func (r *capturingRepo) List(_ context.Context, _ port.ItemFilter) ([]domain.Con
 	panic("unexpected List call in RunE test")
 }
 func (r *capturingRepo) NextCursor(_ domain.ContextItem) string { panic("unexpected NextCursor") }
+func (r *capturingRepo) ReindexFTS(_ context.Context, _, _, _, _ string) error {
+	panic("unexpected ReindexFTS call in RunE test")
+}
 
 // resetNoteFlags zeroes all package-level flag vars that userNoteAddCmd
 // reads. Call at the start of each RunE test and via t.Cleanup so package

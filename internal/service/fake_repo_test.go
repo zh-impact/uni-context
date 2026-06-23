@@ -10,9 +10,10 @@ import (
 )
 
 type fakeRepo struct {
-	mu        sync.Mutex
-	items     map[string]domain.ContextItem
-	createErr error // injectable; if set, Create returns this
+	mu             sync.Mutex
+	items          map[string]domain.ContextItem
+	createErr      error // injectable; if set, Create returns this
+	reindexFTSCall int   // number of times ReindexFTS was invoked
 }
 
 func newFakeRepo() *fakeRepo {
@@ -73,3 +74,13 @@ func (r *fakeRepo) List(_ context.Context, f port.ItemFilter) ([]domain.ContextI
 }
 
 func (r *fakeRepo) NextCursor(_ domain.ContextItem) string { return "" }
+
+// ReindexFTS records the call and returns nil. In-memory fake has no FTS
+// index; service tests use the call count to verify IngestService invokes
+// it for externalized content.
+func (r *fakeRepo) ReindexFTS(_ context.Context, _, _, _, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reindexFTSCall++
+	return nil
+}

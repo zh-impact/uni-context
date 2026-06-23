@@ -290,3 +290,43 @@ func TestIngest_Create_EmptyMIMELeavesContentMIMEEmptyInline(t *testing.T) {
 	assert.Empty(t, got.ContentMIME,
 		"existing callers with MIME='' must leave ContentMIME empty on inline items")
 }
+
+// TestIngest_Create_ExternalizedContentIsFTSSearchable is the service-level
+// integration test for the externalized-content FTS fix. The bug: when
+// content exceeds ContentInlineLimit (4KB) it is externalized to FileStore,
+// leaving item.Content="" — but the AFTER INSERT trigger on context_item
+// reads new.content when writing the FTS row, so the FTS index captured ""
+// and `search "keyword"` returned 0 hits even when the keyword was in the
+// file. The fix: IngestService.Create calls repo.ReindexFTS after a
+// successful Create, rewriting the FTS row with the hydrated content.
+//
+// This test uses the real SQLite-backed repo + searcher (not fakeRepo) so
+// the FTS5 trigger + ReindexFTS actually run end-to-end.
+func TestIngest_Create_ExternalizedContentIsFTSSearchable(t *testing.T) {
+	f := newSearchFixture(t)
+	ctx := context.Background()
+
+	// Build content > 4KB containing a unique searchable needle.
+	// Repeating the needle ensures we exceed ContentInlineLimit while
+	// keeping the test deterministic.
+	needle := "uniquefindabletoken"
+	large := strings.Repeat("filler filler filler ", 250) + needle // ~5KB
+
+	id, err := f.ingest.Create(ctx, Input{
+		Scope:       domain.ScopeUser,
+		Kind:        domain.KindNote,
+		Source:      domain.SourceManual,
+		OwnerUserID: "u-1",
+		Title:       "Externalized Note",
+		Content:     large,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	// The fix: search must find the item by the needle. Without
+	// ReindexFTS, the AFTER INSERT trigger captured "" and this returns 0.
+	resp, err := f.svc.Search(ctx, SearchRequest{Query: needle, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Results, 1, "externalized content must be FTS-searchable post-ReindexFTS")
+	assert.Equal(t, id, resp.Results[0].Item.ID)
+}

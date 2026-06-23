@@ -47,6 +47,12 @@ type App struct {
 	// Plan 2c: bulk re-embed items under the active model after `embed switch`.
 	Reembed *service.ReembedService
 
+	// ReindexFTS is always populated. Bulk-rewrites context_fts rows for
+	// items whose content was externalized, healing the AFTER INSERT
+	// trigger gap that left them FTS-unsearchable. Constructed
+	// unconditionally because FTS search is available in Plan 1 too.
+	ReindexFTS *service.ReindexFTSService
+
 	// Registry is non-nil when cfg.Embedder.Enabled is true. CLI uses it
 	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
 	Registry port.ModelRegistry
@@ -161,6 +167,10 @@ func Wire(cfg *config.Config) (*App, error) {
 		search = service.NewSearchServiceWithEmbedder(searcher, repo, embedder)
 	}
 
+	// ReindexFTS is constructed unconditionally — the FTS gap is not
+	// embedder-dependent (Plan 1 FTS-only users hit it too).
+	reindexFTS := service.NewReindexFTSService(repo, fs)
+
 	return &App{
 		Config:        cfg,
 		DB:            db,
@@ -173,6 +183,7 @@ func Wire(cfg *config.Config) (*App, error) {
 		Backfill:      backfill,
 		Worker:        worker,
 		Reembed:       reembed,
+		ReindexFTS:    reindexFTS,
 		Registry:      registry,
 		Ingest:        ingest,
 		Search:        search,
