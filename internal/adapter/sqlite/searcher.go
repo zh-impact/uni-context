@@ -5,14 +5,14 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"uni-context/internal/port"
 )
 
-// Known limitation: the FTS5 trigram tokenizer requires queries of at
-// least 3 characters. Shorter queries (e.g. the 2-character CJK word
-// `部署`) silently return zero results. See CHANGELOG.md "Known
-// Limitations" — the fix lands in Plan 2 via vector embeddings.
+// Short queries fall back to LIKE because the FTS5 trigram tokenizer
+// requires phrases of at least 3 runes — a 2-char CJK word like `部署`
+// silently returns zero results. See searchLike below.
 
 type Searcher struct {
 	db *sql.DB
@@ -72,6 +72,17 @@ LIMIT ?
 `
 
 func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.SearchHit, error) {
+	if strings.TrimSpace(q.Query) == "" {
+		return nil, nil
+	}
+	// Trigram FTS requires >= 3 runes. Shorter queries (e.g. 2-char CJK
+	// like `部署`) silently return zero results — fall back to LIKE.
+	// Count runes on the raw query: leading/trailing whitespace may be
+	// load-bearing for trigram phrases (see ftsQueryString comment), so
+	// "部署 " (3 runes incl. ASCII space) stays on the FTS path.
+	if utf8.RuneCountInString(q.Query) < 3 {
+		return s.searchLike(ctx, strings.TrimSpace(q.Query), q.Limit)
+	}
 	ftsq := ftsQueryString(q.Query)
 	if ftsq == "" {
 		return nil, nil
@@ -108,6 +119,57 @@ func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.Se
 		// bm25 returns negative scores (more negative = better match).
 		// Negate so higher score = better match.
 		h.Score = -h.Score
+		hits = append(hits, h)
+	}
+	return hits, rows.Err()
+}
+
+// likeSearchSQL is the fallback path for queries shorter than 3 runes.
+// LIKE has no tokenizer minimum and matches substrings directly. Score
+// is a constant 1.0 (no relevance ranking — every match is equal) and
+// results are ordered by created_at DESC for deterministic output.
+// Snippet is left empty: the service layer's title-fallback path
+// (search.go:235-237) covers display. Unindexed scan on context_item —
+// acceptable for the expected <10k personal-note scale.
+const likeSearchSQL = `
+SELECT ci.id, 1.0 AS score
+FROM context_item ci
+WHERE ci.title LIKE ? ESCAPE '\'
+   OR ci.summary LIKE ? ESCAPE '\'
+   OR ci.content LIKE ? ESCAPE '\'
+ORDER BY ci.created_at DESC
+LIMIT ?
+`
+
+// likePattern escapes LIKE wildcards (%, _, \) in the raw query and wraps
+// it in %...% for substring match. The ESCAPE '\' clause in likeSearchSQL
+// activates the backslash as the escape character.
+func likePattern(raw string) string {
+	r := strings.ReplaceAll(raw, `\`, `\\`)
+	r = strings.ReplaceAll(r, `%`, `\%`)
+	r = strings.ReplaceAll(r, `_`, `\_`)
+	return "%" + r + "%"
+}
+
+// searchLike runs the LIKE fallback for short queries. Empty snippet is
+// intentional — callers fall back to item.Title for display.
+func (s *Searcher) searchLike(ctx context.Context, query string, limit int) ([]port.SearchHit, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	pattern := likePattern(query)
+	rows, err := s.db.QueryContext(ctx, likeSearchSQL, pattern, pattern, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("like search: %w", err)
+	}
+	defer rows.Close()
+
+	var hits []port.SearchHit
+	for rows.Next() {
+		var h port.SearchHit
+		if err := rows.Scan(&h.ID, &h.Score); err != nil {
+			return nil, err
+		}
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()

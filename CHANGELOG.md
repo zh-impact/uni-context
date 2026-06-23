@@ -6,6 +6,16 @@ Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
 ### Trigram FTS requires ≥3-character queries (affects 2-char CJK search)
 
+**Resolved for substring matching (2026-06-23):** queries shorter than 3
+runes now fall back to a `LIKE %query%` scan against `title`, `summary`,
+and `content`. 2-char CJK words like `部署` return results in both
+`fts-only` and `hybrid` modes. The original trigram minimum still applies
+to BM25 ranking and snippet extraction — LIKE hits get a flat score of
+1.0 and empty snippet (callers fall back to `item.Title` for display).
+LIKE wildcards in user input (`%`, `_`) are escaped via `ESCAPE '\'`.
+
+**Original limitation (preserved for context):**
+
 The FTS5 index uses the `trigram` tokenizer for CJK-friendly matching.
 Trigram indexes every contiguous 3-character sequence, so queries
 shorter than 3 characters (e.g. the 2-character Chinese word `部署`)
@@ -344,3 +354,25 @@ with useless error text.
 on the happy path. Verified with 3 new unit tests covering string-error
 on 200 OK, object-error on 200 OK, and string-error on non-200.
 
+
+## Bugfix — LIKE fallback for short CJK queries (2026-06-23)
+
+Resolves the long-standing Plan 1 limitation: 2-character CJK queries
+like `部署` silently returned 0 results under `fts-only` mode because
+the FTS5 trigram tokenizer requires queries of at least 3 runes.
+
+**What shipped** (commit pending, on `main` 2026-06-23):
+- `sqlite.Searcher.SearchFTS` now dispatches short queries
+  (`utf8.RuneCountInString(query) < 3`) to a new `searchLike` path.
+- LIKE pattern uses `%<escaped>%` against `title`, `summary`,
+  `content`, with `%`, `_`, `\` escaped via `ESCAPE '\'`.
+- Score is a flat 1.0 (no BM25 ranking); snippet is empty (service
+  layer's title fallback covers display).
+- 3-rune queries with leading/trailing whitespace (e.g. `部署 `) stay
+  on the FTS path — the existing trigram-phrase behavior is preserved.
+- Hybrid mode benefits transparently: RRF folds LIKE hits into the
+  fusion with `1/(rank+60)` weight, same as FTS hits.
+
+Verified with 4 new searcher tests: short CJK match, short ASCII match,
+wildcard escaping, and a regression guard that 3+ rune queries still
+produce non-empty snippets via the FTS path.

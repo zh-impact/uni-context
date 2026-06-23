@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"testing"
 
+	"uni-context/internal/domain"
+	"uni-context/internal/port"
+
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"uni-context/internal/domain"
-	"uni-context/internal/port"
 )
 
 // NOTE on deviations from the brief:
@@ -62,7 +63,7 @@ func TestSearcher_FTS_BasicMatch(t *testing.T) {
 	// strings; we assert set equality instead, which is what the brief
 	// was clearly after.
 	expected := map[string]bool{
-		"如何部署 Go 服务到 k8s":  true,
+		"如何部署 Go 服务到 k8s":    true,
 		"Python 部署 Flask 应用": true,
 	}
 	for _, h := range hits {
@@ -146,6 +147,86 @@ func TestSearcher_FTS_FallsBackToContentSnippet(t *testing.T) {
 	require.Len(t, hits, 1, "title-less note should still be findable via content match")
 	assert.Contains(t, hits[0].Snippet, "important",
 		"snippet must come from content column when title snippet is empty; got %q", hits[0].Snippet)
+}
+
+// TestSearcher_FTS_LikeFallback_ShortCJKQuery: 2-char CJK queries are
+// shorter than the trigram minimum and would silently return 0 results.
+// The LIKE fallback must find substring matches in both title and content.
+func TestSearcher_FTS_LikeFallback_ShortCJKQuery(t *testing.T) {
+	db := openMemWithSampleData(t, []domain.ContextItem{
+		makeItem("部署", "上线流程"),              // title contains "部署"
+		makeItem("上线", "gunicorn 部署 nginx"), // content contains "部署"
+		makeItem("无关", "与目标无任何关系"),          // neither
+	})
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "部署", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hits, 2, "LIKE fallback must match title and content for 2-char CJK")
+}
+
+// TestSearcher_FTS_LikeFallback_ShortASCIIQuery: same fallback for ASCII
+// queries shorter than 3 chars (e.g. "go" matches "golang").
+func TestSearcher_FTS_LikeFallback_ShortASCIIQuery(t *testing.T) {
+	db := openMemWithSampleData(t, []domain.ContextItem{
+		makeItem("golang notes", "rust comparison"),
+		makeItem("rust notes", "go vs rust"),
+		makeItem("python", "java"),
+	})
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "go", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hits, 2, "LIKE fallback must match case-insensitively for 2-char ASCII")
+}
+
+// TestSearcher_FTS_LikeFallback_EscapesWildcards: user input containing
+// LIKE wildcards (%, _) must be escaped so they match literally rather
+// than acting as wildcards.
+func TestSearcher_FTS_LikeFallback_EscapesWildcards(t *testing.T) {
+	db := openMemWithSampleData(t, []domain.ContextItem{
+		makeItem("foo", "100% done"),       // contains literal %
+		makeItem("bar", "10_percent"),      // contains literal _
+		makeItem("baz", "everything else"), // no wildcards
+	})
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "%", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "literal % should only match items containing %, not everything")
+	assert.Equal(t, "100% done", getHitContent(t, db, hits[0].ID))
+
+	hits, err = s.SearchFTS(context.Background(), port.SearchQuery{Query: "_", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "literal _ should only match items containing _, not everything")
+	assert.Equal(t, "10_percent", getHitContent(t, db, hits[0].ID))
+}
+
+// TestSearcher_FTS_LongQueryStillUsesFTS: 3+ char queries must still go
+// through the FTS path (BM25 ranking, snippet extraction). Regression
+// guard against the LIKE fallback accidentally swallowing longer queries.
+func TestSearcher_FTS_LongQueryStillUsesFTS(t *testing.T) {
+	db := openMemWithSampleData(t, []domain.ContextItem{
+		makeItem("部署文档", "如何部署详细"),
+	})
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "部署文", Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	// FTS path produces a snippet; LIKE path leaves snippet empty.
+	// Non-empty snippet proves we hit the FTS path.
+	assert.NotEmpty(t, hits[0].Snippet, "3-char query must use FTS path (snippet non-empty)")
+}
+
+// getHitContent fetches the content column for an item ID. Used by LIKE
+// fallback tests to assert which row matched.
+func getHitContent(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
+	var content string
+	err := db.QueryRow(`SELECT content FROM context_item WHERE id = ?`, id).Scan(&content)
+	require.NoError(t, err)
+	return content
 }
 
 func makeItem(title, content string) domain.ContextItem {
