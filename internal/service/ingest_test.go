@@ -201,3 +201,92 @@ func (failingEmbedder) Model() port.ModelInfo { return port.ModelInfo{Slug: "fai
 func (failingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, fmt.Errorf("simulated embedder failure")
 }
+
+// TestIngest_Create_LargeContentWithMIMEExternalizesToFS verifies that
+// when content exceeds ContentInlineLimit and MIME is set, the FileStore
+// receives the correct MIME (stored in .meta) and the item carries it on
+// ContentMIME. This is the path a large .md file import takes.
+func TestIngest_Create_LargeContentWithMIMEExternalizesToFS(t *testing.T) {
+	f := newIngestFixture(t)
+	large := strings.Repeat("word ", 1000) // ~5KB > 4KB ContentInlineLimit
+	id, err := f.svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     large,
+		MIME:        "text/markdown",
+	})
+	require.NoError(t, err)
+
+	got, err := f.repo.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.Empty(t, got.Content, "inline content should be emptied")
+	assert.NotEmpty(t, got.ContentURI, "content_uri should be set")
+	assert.Equal(t, "text/markdown", got.ContentMIME,
+		"ContentMIME must reflect the caller-specified MIME for externalized content")
+
+	// FileStore .meta must carry the MIME so re-embed / hydration knows the type.
+	data, err := f.fs.Get(got.ContentURI)
+	require.NoError(t, err)
+	assert.Equal(t, large, string(data))
+}
+
+// TestIngest_Create_DefaultMIMEIsTextPlainWhenEmpty verifies that when
+// MIME is empty (existing callers: inline text, stdin), the externalize
+// path falls back to text/plain — preserving Plan 1 behavior byte-for-byte.
+func TestIngest_Create_DefaultMIMEIsTextPlainWhenEmpty(t *testing.T) {
+	f := newIngestFixture(t)
+	large := strings.Repeat("a", 5000) // > 4KB
+	id, err := f.svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     large,
+		// MIME intentionally omitted
+	})
+	require.NoError(t, err)
+
+	got, _ := f.repo.Get(context.Background(), id)
+	assert.Equal(t, "text/plain", got.ContentMIME,
+		"empty MIME must default to text/plain on the externalize path")
+}
+
+// TestIngest_Create_SmallContentPreservesMIMEInline verifies that a small
+// file import (< ContentInlineLimit) with MIME set preserves the MIME on
+// item.ContentMIME even though the content stays inline (not in FileStore).
+// This is the key invariant for .md file imports: the MIME survives on the
+// item so downstream renderers know it's markdown without consulting FileStore.
+func TestIngest_Create_SmallContentPreservesMIMEInline(t *testing.T) {
+	f := newIngestFixture(t)
+	id, err := f.svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     "# tiny markdown",
+		MIME:        "text/markdown",
+	})
+	require.NoError(t, err)
+
+	got, err := f.repo.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Content, "small content stays inline")
+	assert.Empty(t, got.ContentURI, "small content is not externalized")
+	assert.Equal(t, "text/markdown", got.ContentMIME,
+		"MIME must be preserved on inline items when caller sets it")
+}
+
+// TestIngest_Create_EmptyMIMELeavesContentMIMEEmptyInline is a regression
+// guard: existing callers (inline text, stdin) pass MIME="". The inline
+// path must NOT set ContentMIME in that case, preserving the Plan 1
+// invariant where inline items have ContentMIME="".
+func TestIngest_Create_EmptyMIMELeavesContentMIMEEmptyInline(t *testing.T) {
+	f := newIngestFixture(t)
+	id, err := f.svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u-1",
+		Content:     "small content",
+		// MIME intentionally omitted
+	})
+	require.NoError(t, err)
+
+	got, _ := f.repo.Get(context.Background(), id)
+	assert.Empty(t, got.ContentMIME,
+		"existing callers with MIME='' must leave ContentMIME empty on inline items")
+}

@@ -45,6 +45,15 @@ type Input struct {
 	Tags    []string
 
 	SourceMeta map[string]any
+
+	// MIME of the content. Empty means "treat as text/plain" (preserves
+	// existing behavior for inline/stdin notes — no caller update required).
+	// Set by the CLI when importing a .md file so FileStore's .meta and
+	// item.ContentMIME both carry the right MIME. For inline-sized file
+	// imports (< ContentInlineLimit), MIME is still written to item.ContentMIME
+	// so downstream renderers can tell a .md import from a .txt import even
+	// when the bytes didn't go through FileStore.
+	MIME string
 }
 
 func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
@@ -69,17 +78,24 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 	}
 	item.WordCount = countWords(in.Content)
 
+	mime := in.MIME
+	if mime == "" {
+		mime = "text/plain"
+	}
 	if len(in.Content) > domain.ContentInlineLimit {
-		uri, hash, err := s.fs.Put([]byte(in.Content), "text/plain")
+		uri, hash, err := s.fs.Put([]byte(in.Content), mime)
 		if err != nil {
 			return "", fmt.Errorf("externalize content: %w", err)
 		}
 		item.ContentURI = uri
 		item.ContentHash = hash
-		item.ContentMIME = "text/plain"
+		item.ContentMIME = mime
 		item.Content = ""
 	} else {
 		item.Content = in.Content
+		if in.MIME != "" {
+			item.ContentMIME = in.MIME
+		}
 	}
 
 	if err := s.repo.Create(ctx, item); err != nil {
