@@ -122,7 +122,7 @@ func (s *SearchService) searchFTSOnly(ctx context.Context, req SearchRequest) (S
 	return SearchResponse{Results: out, Total: len(out)}, nil
 }
 
-// searchHybrid runs FTS and vector KNN concurrently in sequence, then
+// searchHybrid runs vector KNN and FTS sequentially, then
 // fuses via RRF. Over-fetches 3×limit from each path so post-filter
 // trimming still yields req.Limit results. The fused map is trimmed to
 // req.Limit at the end (VectorStore pre-trims to 3×limit, not to limit).
@@ -177,6 +177,10 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	scopesFilter := scopeSet(req.Scopes)
 	kindsFilter := kindSet(req.Kinds)
 
+	// Cache hydrated items so IDs appearing in both FTS and vector
+	// results only trigger one repo.Get call.
+	itemCache := map[string]domain.ContextItem{}
+
 	// Hydrate + score FTS hits. rank is 0-indexed; contribution uses
 	// 1/(rank+rrfK) so the top FTS hit contributes 1/60.
 	for rank, h := range fHits {
@@ -184,6 +188,7 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 		if err != nil {
 			continue
 		}
+		itemCache[h.ID] = item
 		if scopesFilter != nil && !scopesFilter[item.Scope] {
 			continue
 		}
@@ -205,9 +210,14 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	// Hydrate + score vector hits. Vector search has no snippet text;
 	// fall back to the item title so the UI has something to show.
 	for rank, h := range vHits {
-		item, err := s.repo.Get(ctx, h.ID)
-		if err != nil {
-			continue
+		item, ok := itemCache[h.ID]
+		if !ok {
+			var err error
+			item, err = s.repo.Get(ctx, h.ID)
+			if err != nil {
+				continue
+			}
+			itemCache[h.ID] = item
 		}
 		if scopesFilter != nil && !scopesFilter[item.Scope] {
 			continue

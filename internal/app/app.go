@@ -180,9 +180,12 @@ func Wire(cfg *config.Config) (*App, error) {
 }
 
 // Close releases resources held by the App (currently just the DB handle).
+// Idempotent: safe to call multiple times.
 func (a *App) Close() error {
 	if a.DB != nil {
-		return a.DB.Close()
+		err := a.DB.Close()
+		a.DB = nil
+		return err
 	}
 	return nil
 }

@@ -44,7 +44,7 @@ var userNoteAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 
 		id, err := a.Ingest.Create(cmd.Context(), inputFromFlags(
 			domain.ScopeUser, domain.KindNote, domain.SourceManual,
@@ -70,7 +70,7 @@ var userNoteListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if noteLimit <= 0 {
 			noteLimit = 20
 		}
@@ -117,7 +117,7 @@ var userNoteGetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		item, err := a.Repo.Get(cmd.Context(), args[0])
 		if err != nil {
 			return err
@@ -160,7 +160,7 @@ var userNoteDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if err := a.Repo.Delete(cmd.Context(), args[0]); err != nil {
 			return err
 		}

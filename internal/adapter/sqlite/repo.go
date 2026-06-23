@@ -73,11 +73,11 @@ func (r *ContextRepo) Get(ctx context.Context, id string) (domain.ContextItem, e
 	return item, err
 }
 
-func (r *ContextRepo) Update(ctx context.Context, item domain.ContextItem) error {
-	tags, _ := json.Marshal(item.Tags)
-	meta, _ := json.Marshal(item.SourceMeta)
+func (r *ContextRepo) Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error) {
 	item.Version++
 	item.UpdatedAt = item.UpdatedAt.UTC()
+	tags, _ := json.Marshal(item.Tags)
+	meta, _ := json.Marshal(item.SourceMeta)
 	res, err := r.db.ExecContext(ctx, `
         UPDATE context_item SET
             title=?, summary=?, content=?, content_uri=?, content_mime=?,
@@ -90,13 +90,13 @@ func (r *ContextRepo) Update(ctx context.Context, item domain.ContextItem) error
 		item.Confidence, item.WordCount, item.AnyEmbedding, item.UpdatedAt.Unix(), item.Version, item.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("update item: %w", err)
+		return domain.ContextItem{}, fmt.Errorf("update item: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("%w: item %s", domain.ErrNotFound, item.ID)
+		return domain.ContextItem{}, fmt.Errorf("%w: item %s", domain.ErrNotFound, item.ID)
 	}
-	return nil
+	return item, nil
 }
 
 func (r *ContextRepo) Delete(ctx context.Context, id string) error {

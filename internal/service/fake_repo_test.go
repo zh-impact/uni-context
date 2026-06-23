@@ -42,14 +42,14 @@ func (r *fakeRepo) Get(_ context.Context, id string) (domain.ContextItem, error)
 	return item, nil
 }
 
-func (r *fakeRepo) Update(_ context.Context, item domain.ContextItem) error {
+func (r *fakeRepo) Update(_ context.Context, item domain.ContextItem) (domain.ContextItem, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.items[item.ID]; !ok {
-		return fmt.Errorf("%w: %s", domain.ErrNotFound, item.ID)
+		return domain.ContextItem{}, fmt.Errorf("%w: %s", domain.ErrNotFound, item.ID)
 	}
 	r.items[item.ID] = item
-	return nil
+	return item, nil
 }
 
 func (r *fakeRepo) Delete(_ context.Context, id string) error {

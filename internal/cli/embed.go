@@ -47,7 +47,7 @@ var embedBackfillCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Backfill == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -86,7 +86,7 @@ var embedWorkerCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Worker == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -135,7 +135,7 @@ var embedModelAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Registry == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -160,7 +160,7 @@ var embedModelListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Registry == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -192,7 +192,7 @@ var embedModelRemoveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Registry == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -214,7 +214,7 @@ var embedSwitchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Registry == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -242,7 +242,7 @@ var embedReembedCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.Reembed == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -282,7 +282,7 @@ var embedStatusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 		if a.EmbeddingRepo == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
@@ -330,6 +330,9 @@ func init() {
 		"embedding dimension (must match the model's output dim)")
 	embedModelAddCmd.Flags().StringVar(&modelAddAPIKey, "api-key", "",
 		"API key (required for OpenAI hosted; local servers ignore)")
+
+	_ = embedModelAddCmd.MarkFlagRequired("provider")
+	_ = embedModelAddCmd.MarkFlagRequired("dim")
 
 	embedModelCmd.AddCommand(embedModelAddCmd)
 	embedModelCmd.AddCommand(embedModelListCmd)

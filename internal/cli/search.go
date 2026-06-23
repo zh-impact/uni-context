@@ -33,13 +33,17 @@ var searchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer a.DB.Close()
+		defer a.Close()
 
 		if searchLimit <= 0 {
 			searchLimit = 20
 		}
 
-		resp, err := a.Search.Search(cmd.Context(), serviceSearchReq(query, mode))
+		req, err := serviceSearchReq(query, mode)
+		if err != nil {
+			return err
+		}
+		resp, err := a.Search.Search(cmd.Context(), req)
 		if err != nil {
 			return err
 		}
@@ -81,14 +85,22 @@ var searchCmd = &cobra.Command{
 	},
 }
 
-func serviceSearchReq(query, mode string) service.SearchRequest {
+func serviceSearchReq(query, mode string) (service.SearchRequest, error) {
+	scopes, err := parseScopes(searchScopes)
+	if err != nil {
+		return service.SearchRequest{}, err
+	}
+	kinds, err := parseKinds(searchKinds)
+	if err != nil {
+		return service.SearchRequest{}, err
+	}
 	return service.SearchRequest{
 		Query:  query,
-		Scopes: parseScopes(searchScopes),
-		Kinds:  parseKinds(searchKinds),
+		Scopes: scopes,
+		Kinds:  kinds,
 		Limit:  searchLimit,
 		Mode:   service.SearchMode(mode),
-	}
+	}, nil
 }
 
 // normalizeSearchMode maps the empty string to the Plan 2a default.
@@ -113,20 +125,44 @@ func validateSearchMode(mode string) error {
 	}
 }
 
-func parseScopes(in []string) []domain.Scope {
-	out := make([]domain.Scope, 0, len(in))
-	for _, s := range in {
-		out = append(out, domain.Scope(s))
-	}
-	return out
+var validScopes = map[domain.Scope]bool{
+	domain.ScopeUser:    true,
+	domain.ScopeProject: true,
+	domain.ScopeGlobal:  true,
 }
 
-func parseKinds(in []string) []domain.Kind {
+var validKinds = map[domain.Kind]bool{
+	domain.KindNote:            true,
+	domain.KindExcerpt:         true,
+	domain.KindLink:            true,
+	domain.KindDoc:             true,
+	domain.KindConversationMsg: true,
+	domain.KindMemory:          true,
+	domain.KindFile:            true,
+}
+
+func parseScopes(in []string) ([]domain.Scope, error) {
+	out := make([]domain.Scope, 0, len(in))
+	for _, s := range in {
+		scope := domain.Scope(s)
+		if !validScopes[scope] {
+			return nil, fmt.Errorf("invalid scope %q (valid: user, project, global)", s)
+		}
+		out = append(out, scope)
+	}
+	return out, nil
+}
+
+func parseKinds(in []string) ([]domain.Kind, error) {
 	out := make([]domain.Kind, 0, len(in))
 	for _, s := range in {
-		out = append(out, domain.Kind(s))
+		kind := domain.Kind(s)
+		if !validKinds[kind] {
+			return nil, fmt.Errorf("invalid kind %q (valid: note, excerpt, link, doc, conversation_msg, memory, file)", s)
+		}
+		out = append(out, kind)
 	}
-	return out
+	return out, nil
 }
 
 func init() {

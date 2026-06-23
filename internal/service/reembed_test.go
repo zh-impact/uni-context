@@ -21,7 +21,7 @@ type fakeListRepo struct {
 func (f *fakeListRepo) Create(ctx context.Context, item domain.ContextItem) error {
 	panic("unexpected")
 }
-func (f *fakeListRepo) Update(ctx context.Context, item domain.ContextItem) error {
+func (f *fakeListRepo) Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error) {
 	panic("unexpected")
 }
 func (f *fakeListRepo) Delete(ctx context.Context, id string) error {
@@ -195,8 +195,10 @@ func (emptyFileStore) Delete(uri string) error        { return nil }
 type getItemRepo struct{ items []domain.ContextItem }
 
 func (r *getItemRepo) Create(ctx context.Context, item domain.ContextItem) error { return nil }
-func (r *getItemRepo) Update(ctx context.Context, item domain.ContextItem) error { return nil }
-func (r *getItemRepo) Delete(ctx context.Context, id string) error               { return nil }
+func (r *getItemRepo) Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error) {
+	return item, nil
+}
+func (r *getItemRepo) Delete(ctx context.Context, id string) error { return nil }
 func (r *getItemRepo) Get(ctx context.Context, id string) (domain.ContextItem, error) {
 	for _, it := range r.items {
 		if it.ID == id {

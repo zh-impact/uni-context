@@ -34,7 +34,7 @@ type ItemFilter struct {
 type ContextRepo interface {
 	Create(ctx context.Context, item domain.ContextItem) error
 	Get(ctx context.Context, id string) (domain.ContextItem, error)
-	Update(ctx context.Context, item domain.ContextItem) error
+	Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error)
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, filter ItemFilter) ([]domain.ContextItem, string, error)
 	// NextCursor builds an opaque cursor from the last item returned.

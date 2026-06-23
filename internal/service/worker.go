@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -94,7 +95,7 @@ func (s *WorkerService) Run(ctx context.Context, interval time.Duration) error {
 		}
 
 		processed, err := s.RunOneIteration(ctx)
-		if err != nil && err != context.Canceled {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "worker: processed %d items, sleeping %s\n",

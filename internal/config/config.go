@@ -1,6 +1,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -55,10 +58,13 @@ func Load(path string) (*Config, error) {
 		User:    UserConfig{ID: "default"},
 		DataDir: defaultDataDir(),
 	}
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err == nil {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, err
 		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = defaultDataDir()

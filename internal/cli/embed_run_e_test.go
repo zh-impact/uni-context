@@ -228,7 +228,7 @@ type reembedListRepo struct{ items []domain.ContextItem }
 func (r *reembedListRepo) Create(ctx context.Context, item domain.ContextItem) error {
 	panic("unexpected")
 }
-func (r *reembedListRepo) Update(ctx context.Context, item domain.ContextItem) error {
+func (r *reembedListRepo) Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error) {
 	panic("unexpected")
 }
 func (r *reembedListRepo) Delete(ctx context.Context, id string) error {
@@ -252,7 +252,7 @@ type reembedGetRepo struct{ items []domain.ContextItem }
 func (r *reembedGetRepo) Create(ctx context.Context, item domain.ContextItem) error {
 	panic("unexpected")
 }
-func (r *reembedGetRepo) Update(ctx context.Context, item domain.ContextItem) error {
+func (r *reembedGetRepo) Update(ctx context.Context, item domain.ContextItem) (domain.ContextItem, error) {
 	panic("unexpected")
 }
 func (r *reembedGetRepo) Delete(ctx context.Context, id string) error {

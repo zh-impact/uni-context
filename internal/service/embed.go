@@ -109,7 +109,7 @@ func (s *EmbedService) Embed(ctx context.Context, itemID, title, content string)
 		return fmt.Errorf("load item for flag update: %w", err)
 	}
 	item.AnyEmbedding = 1
-	if err := s.repo.Update(ctx, item); err != nil {
+	if _, err := s.repo.Update(ctx, item); err != nil {
 		s.recordStatus(ctx, itemID, model, "done", "")
 		return fmt.Errorf("mark any_embedding: %w", err)
 	}

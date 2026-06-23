@@ -68,7 +68,10 @@ func TestServiceSearchReqCarriesMode(t *testing.T) {
 	searchKinds = []string{"note"}
 	searchLimit = 7
 
-	req := serviceSearchReq("hello world", "hybrid")
+	req, err := serviceSearchReq("hello world", "hybrid")
+	if err != nil {
+		t.Fatalf("serviceSearchReq: %v", err)
+	}
 
 	if req.Query != "hello world" {
 		t.Errorf("Query: got %q, want %q", req.Query, "hello world")

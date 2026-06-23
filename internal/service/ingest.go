@@ -118,10 +118,35 @@ func countWords(s string) int {
 			inWord = false
 			continue
 		}
+		if isCJK(r) {
+			inWord = false
+			n++
+			continue
+		}
 		if !inWord {
 			n++
 			inWord = true
 		}
 	}
 	return n
+}
+
+// isCJK reports whether r is a CJK ideograph or related script character
+// that should be counted as one word each (no space delimiters).
+func isCJK(r rune) bool {
+	switch {
+	case 0x4E00 <= r && r <= 0x9FFF: // CJK Unified Ideographs
+		return true
+	case 0x3400 <= r && r <= 0x4DBF: // CJK Extension A
+		return true
+	case 0x3040 <= r && r <= 0x30FF: // Hiragana + Katakana
+		return true
+	case 0xAC00 <= r && r <= 0xD7AF: // Hangul Syllables
+		return true
+	case 0xF900 <= r && r <= 0xFAFF: // CJK Compatibility Ideographs
+		return true
+	case 0x31C0 <= r && r <= 0x31EF: // CJK Strokes
+		return true
+	}
+	return false
 }

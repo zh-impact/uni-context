@@ -79,7 +79,8 @@ func TestContextRepo_Update(t *testing.T) {
 
 	item.Title = "Updated"
 	item.Content = "New content"
-	require.NoError(t, repo.Update(ctx, item))
+	_, err := repo.Update(ctx, item)
+	require.NoError(t, err)
 
 	got, err := repo.Get(ctx, item.ID)
 	require.NoError(t, err)

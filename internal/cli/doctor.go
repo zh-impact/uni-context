@@ -14,7 +14,7 @@ var doctorCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("setup error: %w", err)
 		}
-		defer a.DB.Close()
+		defer a.Close()
 
 		fmt.Printf("config path:    %s\n", flagConfigPath)
 		fmt.Printf("data dir:       %s\n", cfg.DataDir)
