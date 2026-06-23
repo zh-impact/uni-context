@@ -41,8 +41,19 @@ var userNoteLoadAppFn = loadApp
 
 var userNoteAddCmd = &cobra.Command{
 	Use:   "add [content|-]",
-	Short: "Add a personal note. Pass - to read content from stdin.",
-	Args:  cobra.MaximumNArgs(1),
+	Short: "Add a personal note (positional arg, - for stdin, or --file <path>)",
+	Long: `Add a personal note.
+
+Content sources (mutually exclusive — pick one):
+  positional arg    unictx user note add "hello world"
+  -                 read from stdin (echo "hi" | unictx user note add -)
+  --file <path>     import from a .txt or .md file (max 10 MB)
+
+When --file is used without --title, the title defaults to the file's
+basename with its extension stripped (weekly.md -> "weekly"). Markdown
+files are tagged text/markdown so renderers can render them; other text
+files default to text/plain.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Rule 0: --file "" (explicit empty) must not fall through to
 		// readContent(args), which would surface the misleading
