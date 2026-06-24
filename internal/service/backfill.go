@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"uni-context/internal/port"
 )
@@ -16,12 +16,16 @@ import (
 type BackfillService struct {
 	repo  port.ContextRepo
 	embed *EmbedService
+	// log receives per-100-item progress lines. Injected via constructor
+	// so tests can assert on progress and the service has no direct
+	// os.Stderr coupling.
+	log io.Writer
 }
 
-// NewBackfillService wires the ContextRepo (for listing unembedded items)
-// and EmbedService (for embedding each one).
-func NewBackfillService(repo port.ContextRepo, embed *EmbedService) *BackfillService {
-	return &BackfillService{repo: repo, embed: embed}
+// NewBackfillService wires the ContextRepo (for listing unembedded items),
+// EmbedService (for embedding each one), and a logger for progress.
+func NewBackfillService(repo port.ContextRepo, embed *EmbedService, log io.Writer) *BackfillService {
+	return &BackfillService{repo: repo, embed: embed, log: log}
 }
 
 // BackfillFailure records a single per-item embed error during a run.
@@ -94,7 +98,7 @@ func (s *BackfillService) Run(ctx context.Context, limit int, dryRun bool) (Back
 		report.Embedded++
 
 		if (i+1)%100 == 0 {
-			fmt.Fprintf(os.Stderr, "backfill: %d items processed\n", i+1)
+			fmt.Fprintf(s.log, "backfill: %d items processed\n", i+1)
 		}
 	}
 	return report, nil

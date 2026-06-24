@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 
 	"uni-context/internal/port"
@@ -27,19 +27,25 @@ type EmbedService struct {
 	repo     port.ContextRepo
 	fs       port.FileStore
 	embRepo  port.EmbeddingRepo
+	// log receives the non-fatal "could not record embedding status"
+	// warning. Injected via constructor so tests can assert on warnings
+	// and the service has no direct os.Stderr coupling.
+	log io.Writer
 }
 
 // NewEmbedService wires the embedder, vector store, context repo,
-// filestore (for content hydration), and embedding status repo.
+// filestore (for content hydration), embedding status repo, and a logger
+// for non-fatal status-write warnings.
 func NewEmbedService(
 	embedder port.Embedder,
 	vs port.VectorStore,
 	repo port.ContextRepo,
 	fs port.FileStore,
 	embRepo port.EmbeddingRepo,
+	log io.Writer,
 ) *EmbedService {
 	return &EmbedService{
-		embedder: embedder, vs: vs, repo: repo, fs: fs, embRepo: embRepo,
+		embedder: embedder, vs: vs, repo: repo, fs: fs, embRepo: embRepo, log: log,
 	}
 }
 
@@ -140,11 +146,11 @@ func (s *EmbedService) hydrateContent(ctx context.Context, itemID string) (strin
 	return string(bytes), nil
 }
 
-// recordStatus wraps embRepo.UpsertStatus with stderr logging on failure.
+// recordStatus wraps embRepo.UpsertStatus with log logging on failure.
 // Status-row write failure must never mask the original embed result.
 func (s *EmbedService) recordStatus(ctx context.Context, itemID, model, status, errStr string) {
 	if err := s.embRepo.UpsertStatus(ctx, itemID, model, status, errStr); err != nil {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(s.log,
 			"warn: failed to record embedding status for %s: %v\n", itemID, err)
 	}
 }

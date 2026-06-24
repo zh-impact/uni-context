@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,8 +145,8 @@ func TestIngest_Create_TriggersEmbed_WhenConfigured(t *testing.T) {
 	vs, repo, db := newMemVectorStore(t)
 	defer db.Close()
 	emb := fake.New("fake-model", 8)
-	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db))
-	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
+	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db), io.Discard)
+	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc, io.Discard)
 
 	ctx := context.Background()
 	id, err := svc.Create(ctx, Input{
@@ -178,8 +179,8 @@ func TestIngest_Create_SucceedsWhenEmbedFails(t *testing.T) {
 	vs, repo, db := newMemVectorStore(t)
 	defer db.Close()
 	emb := &failingEmbedder{}
-	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db))
-	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc)
+	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db), io.Discard)
+	svc := NewIngestServiceWithEmbedder(repo, newMemFileStore(t), embedSvc, io.Discard)
 
 	id, err := svc.Create(context.Background(), Input{
 		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,

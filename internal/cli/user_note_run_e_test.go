@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,7 +87,7 @@ func TestUserNoteAddCmd_RunEWithFileImport_PreservesFilenameAndMIME(t *testing.T
 	a := newStubApp(t)
 	// emptyFileStore is reused from embed_run_e_test.go — safe because the
 	// small fixture stays inline and never calls fs.Put.
-	a.Ingest = service.NewIngestService(repo, emptyFileStore{})
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
 	restore := swapUserNoteLoadAppFn(a)
 	defer restore()
 	resetNoteFlags(t)
@@ -120,7 +121,7 @@ func TestUserNoteAddCmd_RunEWithFileImport_PreservesFilenameAndMIME(t *testing.T
 func TestUserNoteAddCmd_RunEFileFlagMutuallyExclusiveWithPositional(t *testing.T) {
 	repo := &capturingRepo{}
 	a := newStubApp(t)
-	a.Ingest = service.NewIngestService(repo, emptyFileStore{})
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
 	restore := swapUserNoteLoadAppFn(a)
 	defer restore()
 	resetNoteFlags(t)
@@ -145,7 +146,7 @@ func TestUserNoteAddCmd_RunEFileFlagMutuallyExclusiveWithPositional(t *testing.T
 func TestUserNoteAddCmd_RunEPropagatesValidationError(t *testing.T) {
 	repo := &capturingRepo{}
 	a := newStubApp(t)
-	a.Ingest = service.NewIngestService(repo, emptyFileStore{})
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
 	restore := swapUserNoteLoadAppFn(a)
 	defer restore()
 	resetNoteFlags(t)

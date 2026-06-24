@@ -2,13 +2,15 @@ package service
 
 import (
 	"database/sql"
+	"io"
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-	_ "github.com/mattn/go-sqlite3"
 	"uni-context/internal/adapter/fsstore"
 	"uni-context/internal/adapter/sqlite"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
 )
 
 type searchFixture struct {
@@ -29,7 +31,7 @@ func newSearchFixture(t *testing.T) *searchFixture {
 	require.NoError(t, err)
 
 	return &searchFixture{
-		ingest: NewIngestService(repo, fs),
-		svc:    NewSearchService(searcher, repo),
+		ingest: NewIngestService(repo, fs, io.Discard),
+		svc:    NewSearchService(searcher, repo, io.Discard),
 	}
 }

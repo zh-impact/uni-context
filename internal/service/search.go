@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"time"
 
@@ -23,6 +23,10 @@ type SearchService struct {
 	// tokenizer spin) is cancelled and the existing per-leg fallback
 	// path fires instead of blocking the whole search.
 	legTimeout time.Duration
+	// log receives non-fatal warnings (hybrid degradation, per-leg
+	// timeouts). Injected via constructor so tests can assert on warnings
+	// and the service has no direct os.Stderr coupling.
+	log io.Writer
 }
 
 // legTimeoutOrDefault returns the configured per-leg timeout, defaulting
@@ -39,15 +43,15 @@ func (s *SearchService) legTimeoutOrDefault() time.Duration {
 // NewSearchService wires the fts-only SearchService (Plan 1 shape). Mode
 // defaults to fts-only per request; hybrid requests need
 // NewSearchServiceWithEmbedder.
-func NewSearchService(searcher port.Searcher, repo port.ContextRepo) *SearchService {
-	return &SearchService{searcher: searcher, repo: repo}
+func NewSearchService(searcher port.Searcher, repo port.ContextRepo, log io.Writer) *SearchService {
+	return &SearchService{searcher: searcher, repo: repo, log: log}
 }
 
 // NewSearchServiceWithEmbedder wires an embedder for hybrid search. If
 // embedder is nil, behavior is identical to NewSearchService. Mirrors
 // the NewIngestServiceWithEmbedder pattern from Task 6.
-func NewSearchServiceWithEmbedder(searcher port.Searcher, repo port.ContextRepo, embedder port.Embedder) *SearchService {
-	return &SearchService{searcher: searcher, repo: repo, embedder: embedder}
+func NewSearchServiceWithEmbedder(searcher port.Searcher, repo port.ContextRepo, embedder port.Embedder, log io.Writer) *SearchService {
+	return &SearchService{searcher: searcher, repo: repo, embedder: embedder, log: log}
 }
 
 // SearchMode picks the retrieval strategy for a SearchRequest. Empty
@@ -218,11 +222,11 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	// Ollama down). Mirrors the warn-and-continue pattern in ingest.go:103-105.
 	queryVec, err := s.embedder.Embed(ctx, []string{req.Query})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warn: hybrid search embed failed, falling back to fts-only: %v\n", err)
+		fmt.Fprintf(s.log, "warn: hybrid search embed failed, falling back to fts-only: %v\n", err)
 		return s.searchFTSOnly(ctx, req)
 	}
 	if len(queryVec) != 1 {
-		fmt.Fprintf(os.Stderr, "warn: hybrid search embedder returned %d vectors for one query, falling back to fts-only\n", len(queryVec))
+		fmt.Fprintf(s.log, "warn: hybrid search embedder returned %d vectors for one query, falling back to fts-only\n", len(queryVec))
 		return s.searchFTSOnly(ctx, req)
 	}
 
@@ -241,7 +245,7 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	})
 	cancelVec()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warn: hybrid search vector lookup failed, falling back to fts-only: %v\n", err)
+		fmt.Fprintf(s.log, "warn: hybrid search vector lookup failed, falling back to fts-only: %v\n", err)
 		return s.searchFTSOnly(ctx, req)
 	}
 
@@ -255,7 +259,7 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 		// fusion loop a no-op; the vector loop still scores its hits,
 		// and the final trim to `limit` returns them as MatchedBy=
 		// ["vector"]-only.
-		fmt.Fprintf(os.Stderr, "warn: hybrid search fts failed, continuing with vector-only results: %v\n", err)
+		fmt.Fprintf(s.log, "warn: hybrid search fts failed, continuing with vector-only results: %v\n", err)
 		fHits = nil
 	}
 

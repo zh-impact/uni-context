@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"uni-context/internal/domain"
@@ -73,8 +74,8 @@ func newReembedServiceForTest(t *testing.T, items []domain.ContextItem, spy *emb
 	// For reembed tests we don't actually care about Put or hydration
 	// correctness; we only count Embed calls via spy.calls. Use a fake
 	// vs that always succeeds and a fake fs that returns empty content.
-	embedSvc := NewEmbedService(spy, &noopVectorStore{}, &getItemRepo{items: items}, &emptyFileStore{}, embRepo)
-	return NewReembedService(repo, embedSvc, port.ModelInfo{Slug: "active-model", Dimension: 8}), embRepo
+	embedSvc := NewEmbedService(spy, &noopVectorStore{}, &getItemRepo{items: items}, &emptyFileStore{}, embRepo, io.Discard)
+	return NewReembedService(repo, embedSvc, port.ModelInfo{Slug: "active-model", Dimension: 8}, io.Discard), embRepo
 }
 
 func TestReembedService_DryRunDoesNotEmbed(t *testing.T) {
@@ -144,8 +145,8 @@ func TestReembedService_FailureContinuesAndRecords(t *testing.T) {
 	spy := &failingEmbedSpy{failOn: "t-boom\n\nc"}
 	embRepo := &fakeEmbedRepo{statusByItem: map[string]port.EmbeddingStatus{}}
 	repo := &fakeListRepo{items: items}
-	embedSvc := NewEmbedService(spy, &noopVectorStore{}, &getItemRepo{items: items}, &emptyFileStore{}, embRepo)
-	svc := NewReembedService(repo, embedSvc, port.ModelInfo{Slug: "active-model", Dimension: 8})
+	embedSvc := NewEmbedService(spy, &noopVectorStore{}, &getItemRepo{items: items}, &emptyFileStore{}, embRepo, io.Discard)
+	svc := NewReembedService(repo, embedSvc, port.ModelInfo{Slug: "active-model", Dimension: 8}, io.Discard)
 
 	report, err := svc.Run(context.Background(), 0, false)
 	require.NoError(t, err)

@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"uni-context/internal/port"
 )
@@ -24,10 +24,14 @@ import (
 type ReindexFTSService struct {
 	repo port.ContextRepo
 	fs   port.FileStore
+	// log receives per-page progress lines ("reindex-fts: N items scanned").
+	// Injected via constructor so tests can assert on progress and the
+	// service has no direct os.Stderr coupling.
+	log io.Writer
 }
 
-func NewReindexFTSService(repo port.ContextRepo, fs port.FileStore) *ReindexFTSService {
-	return &ReindexFTSService{repo: repo, fs: fs}
+func NewReindexFTSService(repo port.ContextRepo, fs port.FileStore, log io.Writer) *ReindexFTSService {
+	return &ReindexFTSService{repo: repo, fs: fs, log: log}
 }
 
 // ReindexFailure records a single per-item error during a run.
@@ -142,7 +146,7 @@ func (s *ReindexFTSService) Run(ctx context.Context, limit int, dryRun bool) (Re
 		}
 		cursor = next
 
-		fmt.Fprintf(os.Stderr, "reindex-fts: %d items scanned\n", report.Scanned)
+		fmt.Fprintf(s.log, "reindex-fts: %d items scanned\n", report.Scanned)
 	}
 	return report, nil
 }

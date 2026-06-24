@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"time"
 
 	"uni-context/internal/port"
@@ -20,13 +20,18 @@ type WorkerService struct {
 	repo    port.ContextRepo
 	embRepo port.EmbeddingRepo
 	embed   *EmbedService
+	// log receives per-item retry warnings and per-iteration progress
+	// lines ("worker: processed N items, sleeping <interval>"). Injected
+	// via constructor so tests can assert on warnings and the service
+	// has no direct os.Stderr coupling.
+	log io.Writer
 }
 
 // NewWorkerService wires the context repo (for hydration), embedding
-// status repo (for ListFailed), and EmbedService (which writes the new
-// status row on each retry).
-func NewWorkerService(repo port.ContextRepo, embRepo port.EmbeddingRepo, embed *EmbedService) *WorkerService {
-	return &WorkerService{repo: repo, embRepo: embRepo, embed: embed}
+// status repo (for ListFailed), EmbedService (which writes the new
+// status row on each retry), and a logger for retry warnings + progress.
+func NewWorkerService(repo port.ContextRepo, embRepo port.EmbeddingRepo, embed *EmbedService, log io.Writer) *WorkerService {
+	return &WorkerService{repo: repo, embRepo: embRepo, embed: embed, log: log}
 }
 
 // workerBatchSize caps how many failed rows one iteration pulls. 100 is
@@ -62,14 +67,14 @@ func (s *WorkerService) RunOneIteration(ctx context.Context) (int, error) {
 			// Item was deleted between failure and retry. Log + skip;
 			// the ON DELETE CASCADE on context_embedding.item_id should
 			// have removed the row already, but defensive.
-			fmt.Fprintf(os.Stderr, "worker: item %s vanished: %v\n", st.ItemID, err)
+			fmt.Fprintf(s.log, "worker: item %s vanished: %v\n", st.ItemID, err)
 			continue
 		}
 
 		// EmbedService.Embed handles status row update internally (writes
 		// 'done' on success, 'failed' + attempts++ on failure).
 		if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
-			fmt.Fprintf(os.Stderr, "worker: retry failed for %s (attempt %d): %v\n",
+			fmt.Fprintf(s.log, "worker: retry failed for %s (attempt %d): %v\n",
 				item.ID, st.Attempts+1, err)
 		}
 		processed++
@@ -98,7 +103,7 @@ func (s *WorkerService) Run(ctx context.Context, interval time.Duration) error {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "worker: processed %d items, sleeping %s\n",
+		fmt.Fprintf(s.log, "worker: processed %d items, sleeping %s\n",
 			processed, interval)
 
 		select {

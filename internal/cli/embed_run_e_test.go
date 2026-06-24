@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"testing"
 
@@ -187,9 +188,9 @@ func TestEmbedReembedCmd_RunEWithRealService(t *testing.T) {
 	repo := &reembedListRepo{items: items}
 	embRepo := &stubEmbeddingRepo{rows: []port.EmbeddingStatus{}}
 	embedSvc := service.NewEmbedService(spy, &noopVectorStore{},
-		&reembedGetRepo{items: items}, &emptyFileStore{}, embRepo)
+		&reembedGetRepo{items: items}, &emptyFileStore{}, embRepo, io.Discard)
 	reembed := service.NewReembedService(repo, embedSvc,
-		port.ModelInfo{Slug: "active-model", Dimension: 8})
+		port.ModelInfo{Slug: "active-model", Dimension: 8}, io.Discard)
 
 	a := newStubApp(t)
 	a.Reembed = reembed

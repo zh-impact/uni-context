@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,7 @@ func newEmbedFixture(t *testing.T) (*embedFixture, func()) {
 	emb := fake.New("fake-model", 8)
 	fs := newMemFileStore(t)              // Plan 2b: hydration target
 	embRepo := newMemEmbeddingRepo(t, db) // Plan 2b: shared DB with repo
-	svc := NewEmbedService(emb, vs, repo, fs, embRepo)
+	svc := NewEmbedService(emb, vs, repo, fs, embRepo, io.Discard)
 	cleanup := func() { _ = db.Close() }
 	return &embedFixture{
 		repo: repo, vs: vs, emb: emb, fs: fs, embRepo: embRepo, svc: svc,

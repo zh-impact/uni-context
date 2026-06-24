@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 
 	"uni-context/internal/domain"
@@ -41,7 +42,7 @@ func TestReindexFTS_Run_HydratesExternalizedItems(t *testing.T) {
 		},
 	}
 
-	svc := NewReindexFTSService(repo, fs)
+	svc := NewReindexFTSService(repo, fs, io.Discard)
 	report, err := svc.Run(ctx, 0, false)
 	require.NoError(t, err)
 
@@ -65,7 +66,7 @@ func TestReindexFTS_Run_DryRunCountsOnly(t *testing.T) {
 	require.NoError(t, repo.Create(ctx, externalized))
 
 	fs := &explodingFileStore{} // any Get call fails the test
-	svc := NewReindexFTSService(repo, fs)
+	svc := NewReindexFTSService(repo, fs, io.Discard)
 
 	report, err := svc.Run(ctx, 0, true)
 	require.NoError(t, err)
@@ -89,7 +90,7 @@ func TestReindexFTS_Run_FileStoreMissRecordsFailure(t *testing.T) {
 	fs := &cannedFileStore{
 		files: map[string][]byte{}, // miss on every URI
 	}
-	svc := NewReindexFTSService(repo, fs)
+	svc := NewReindexFTSService(repo, fs, io.Discard)
 
 	report, err := svc.Run(ctx, 0, false)
 	require.NoError(t, err)
@@ -111,7 +112,7 @@ func TestReindexFTS_Run_RespectsLimit(t *testing.T) {
 		item.Content = ""
 		require.NoError(t, repo.Create(ctx, item))
 	}
-	svc := NewReindexFTSService(repo, fs)
+	svc := NewReindexFTSService(repo, fs, io.Discard)
 
 	report, err := svc.Run(ctx, 2, true)
 	require.NoError(t, err)

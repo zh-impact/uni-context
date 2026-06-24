@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -34,7 +35,7 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 		repo:   repo,
 		fs:     fs,
 		fsRoot: root,
-		svc:    NewIngestService(repo, fs),
+		svc:    NewIngestService(repo, fs, io.Discard),
 	}
 }
 

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestWorkerService_RetriesFailedEmbeddings(t *testing.T) {
 	// EmbedService doesn't know about BackfillService's helper; use repo
 	// to fetch title/content for the worker. The WorkerService will
 	// fetch internally.
-	svc := NewWorkerService(f.repo, f.embRepo, f.svc)
+	svc := NewWorkerService(f.repo, f.embRepo, f.svc, io.Discard)
 
 	// RunOneIteration exposes single-pass semantics for testing.
 	processed, err := svc.RunOneIteration(context.Background())
@@ -63,7 +64,7 @@ func TestWorkerService_NoFailures_ReturnsZero(t *testing.T) {
 	f, cleanup := newEmbedFixture(t)
 	defer cleanup()
 
-	svc := NewWorkerService(f.repo, f.embRepo, f.svc)
+	svc := NewWorkerService(f.repo, f.embRepo, f.svc, io.Discard)
 	processed, err := svc.RunOneIteration(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, processed, "nothing to retry")
@@ -73,7 +74,7 @@ func TestWorkerService_Run_ExitsOnContextCancel(t *testing.T) {
 	f, cleanup := newEmbedFixture(t)
 	defer cleanup()
 
-	svc := NewWorkerService(f.repo, f.embRepo, f.svc)
+	svc := NewWorkerService(f.repo, f.embRepo, f.svc, io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled
 
@@ -106,7 +107,7 @@ func TestWorkerService_PartialFailure_KeepsItemInQueue(t *testing.T) {
 		return nil, errors.New("persistent")
 	})
 
-	svc := NewWorkerService(f.repo, f.embRepo, f.svc)
+	svc := NewWorkerService(f.repo, f.embRepo, f.svc, io.Discard)
 	processed, err := svc.RunOneIteration(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, processed)

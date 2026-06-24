@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"uni-context/internal/port"
 )
@@ -21,12 +21,17 @@ type ReembedService struct {
 	repo   port.ContextRepo
 	embed  *EmbedService
 	active port.ModelInfo // slug of the currently-wired embedder
+	// log receives per-100-item progress lines. Injected via constructor
+	// so tests can assert on progress and the service has no direct
+	// os.Stderr coupling.
+	log io.Writer
 }
 
 // NewReembedService wires the ContextRepo (lists candidate items) +
-// EmbedService (embeds each) + the active model identifier (filter key).
-func NewReembedService(repo port.ContextRepo, embed *EmbedService, active port.ModelInfo) *ReembedService {
-	return &ReembedService{repo: repo, embed: embed, active: active}
+// EmbedService (embeds each) + the active model identifier (filter key)
+// + a logger for progress reporting.
+func NewReembedService(repo port.ContextRepo, embed *EmbedService, active port.ModelInfo, log io.Writer) *ReembedService {
+	return &ReembedService{repo: repo, embed: embed, active: active, log: log}
 }
 
 // ReembedFailure records a per-item embed error. Aggregated in
@@ -90,7 +95,7 @@ func (s *ReembedService) Run(ctx context.Context, limit int, dryRun bool) (Reemb
 		report.Embedded++
 
 		if (i+1)%100 == 0 {
-			fmt.Fprintf(os.Stderr, "reembed: %d items processed\n", i+1)
+			fmt.Fprintf(s.log, "reembed: %d items processed\n", i+1)
 		}
 	}
 	return report, nil

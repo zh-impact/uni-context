@@ -148,34 +148,34 @@ func Wire(cfg *config.Config) (*App, error) {
 		// embeddingRepo shares the same db so status rows and items live
 		// in one DB. Exposed on App so the worker (Task 6) can reach it.
 		embeddingRepo = sqlite.NewEmbeddingRepo(db)
-		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embeddingRepo)
+		embedSvc = service.NewEmbedService(embedder, vectorStore, repo, fs, embeddingRepo, os.Stderr)
 		// Plan 2b Task 5: BackfillService shares repo + embedSvc so the
 		// 'embed backfill' CLI can iterate unembedded items and embed each.
-		backfill = service.NewBackfillService(repo, embedSvc)
+		backfill = service.NewBackfillService(repo, embedSvc, os.Stderr)
 		// Plan 2b Task 6: WorkerService retries status='failed' rows by
 		// calling EmbedService.Embed per item; shares repo so it can
 		// hydrate externalized content via FileStore.
-		worker = service.NewWorkerService(repo, embeddingRepo, embedSvc)
+		worker = service.NewWorkerService(repo, embeddingRepo, embedSvc, os.Stderr)
 		// Plan 2c: ReembedService targets items without a done row for the
 		// active model so `embed switch` + `embed reembed` migrates them.
 		reembed = service.NewReembedService(repo, embedSvc, port.ModelInfo{
 			Slug: active.Slug, Dimension: active.Dimension,
-		})
+		}, os.Stderr)
 	}
 
-	ingest := service.NewIngestService(repo, fs)
+	ingest := service.NewIngestService(repo, fs, os.Stderr)
 	if embedSvc != nil {
-		ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc)
+		ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc, os.Stderr)
 	}
 
-	search := service.NewSearchService(searcher, repo)
+	search := service.NewSearchService(searcher, repo, os.Stderr)
 	if embedder != nil {
-		search = service.NewSearchServiceWithEmbedder(searcher, repo, embedder)
+		search = service.NewSearchServiceWithEmbedder(searcher, repo, embedder, os.Stderr)
 	}
 
 	// ReindexFTS is constructed unconditionally — the FTS gap is not
 	// embedder-dependent (Plan 1 FTS-only users hit it too).
-	reindexFTS := service.NewReindexFTSService(repo, fs)
+	reindexFTS := service.NewReindexFTSService(repo, fs, os.Stderr)
 	// ItemService owns externalization hydration; unconditional so the CLI's
 	// read/delete paths go through a use case in every plan.
 	items := service.NewItemService(repo, fs)

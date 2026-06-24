@@ -1,9 +1,12 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +33,7 @@ func newHybridFixture(t *testing.T) (*SearchService, port.VectorStore, *fake.Emb
 	// so it sees every vector that the returned `vs` writes. No need to
 	// share the VectorStore instance.
 	searcher := sqlite.NewSearcher(db)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 	return svc, vs, emb, repo
 }
 
@@ -181,7 +184,7 @@ func TestSearchService_Hybrid_DegradesToFTSWhenEmbedderNil(t *testing.T) {
 	_, repo, db := newMemVectorStore(t)
 	t.Cleanup(func() { _ = db.Close() })
 	searcher := sqlite.NewSearcher(db)
-	svc := NewSearchService(searcher, repo) // no embedder
+	svc := NewSearchService(searcher, repo, io.Discard) // no embedder
 
 	ctx := context.Background()
 	item, _ := domain.NewContextItem(domain.ScopeUser, domain.KindNote, domain.SourceManual,
@@ -225,7 +228,12 @@ func TestSearchService_Hybrid_DegradesToFTSOnEmbedError(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	searcher := sqlite.NewSearcher(db)
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, &errorEmbedder{inner: emb})
+	// Inject a buffer so we can assert the degradation warning is logged.
+	// This is the testability payoff from the constructor-injected logger:
+	// pre-refactor these warnings disappeared into os.Stderr and could not
+	// be asserted in tests.
+	var logBuf bytes.Buffer
+	svc := NewSearchServiceWithEmbedder(searcher, repo, &errorEmbedder{inner: emb}, &logBuf)
 
 	ctx := context.Background()
 	// Seed one FTS-matchable item. Vector writes are intentionally
@@ -246,6 +254,11 @@ func TestSearchService_Hybrid_DegradesToFTSOnEmbedError(t *testing.T) {
 		assert.Equal(t, []string{"fts"}, r.MatchedBy,
 			"every result from a degraded hybrid search must be flagged fts-only")
 	}
+	// The degradation must be surfaced as a warning on the injected logger,
+	// not silently swallowed — operators reading the log can tell why their
+	// hybrid query returned fts-only results.
+	assert.Contains(t, strings.ToLower(logBuf.String()), "embed failed",
+		"degradation to fts-only must be logged as a warning on the injected writer")
 }
 
 // TestSearchService_Hybrid_FTSFailureReturnsVectorOnly is the regression
@@ -273,7 +286,7 @@ func TestSearchService_Hybrid_FTSFailureReturnsVectorOnly(t *testing.T) {
 		ftsErr:  fmt.Errorf("simulated FTS index corruption"),
 	}
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 
 	resp, err := svc.Search(context.Background(), SearchRequest{
 		Query: "anything", Mode: SearchModeHybrid, Limit: 5,
@@ -325,7 +338,7 @@ func TestSearchService_Hybrid_TiebreakPrefersNewer(t *testing.T) {
 		},
 	}
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 
 	resp, err := svc.Search(context.Background(), SearchRequest{
 		Query: "x", Mode: SearchModeHybrid, Limit: 5,
@@ -400,7 +413,7 @@ func TestSearchService_Hybrid_FTSRankIsPostFilter(t *testing.T) {
 		// vecHits empty: isolates FTS contribution in u1's final score.
 	}
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 
 	resp, err := svc.Search(context.Background(), SearchRequest{
 		Query:  "x",
@@ -446,7 +459,7 @@ func TestSearchService_Hybrid_PerLegTimeoutPreventsVecHang(t *testing.T) {
 		ftsHits:  []port.SearchHit{{ID: "fts-hit-1", Score: 1.0, Snippet: "match"}},
 	}
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 	// Tight timeout for fast test feedback. Production leaves legTimeout
 	// zero, which defaults to 5s inside legTimeoutOrDefault.
 	svc.legTimeout = 50 * time.Millisecond
@@ -490,7 +503,7 @@ func TestSearchService_Hybrid_PerLegTimeoutPreventsFTSHang(t *testing.T) {
 		blockFTS: true,
 	}
 	emb := fake.New("fake-model", 8)
-	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb, io.Discard)
 	svc.legTimeout = 50 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)

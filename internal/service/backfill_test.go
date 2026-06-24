@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestBackfillService_ProcessesOnlyUnembeddedItems(t *testing.T) {
 	// Mark C as already embedded
 	require.NoError(t, f.svc.Embed(context.Background(), itemC, "gamma", "content C"))
 
-	svc := NewBackfillService(f.repo, f.svc)
+	svc := NewBackfillService(f.repo, f.svc, io.Discard)
 	report, err := svc.Run(context.Background(), 0, false)
 	require.NoError(t, err)
 
@@ -44,7 +45,7 @@ func TestBackfillService_DryRunDoesNotEmbed(t *testing.T) {
 
 	itemA := makeItemForBackfill(t, f, "alpha", "content A")
 
-	svc := NewBackfillService(f.repo, f.svc)
+	svc := NewBackfillService(f.repo, f.svc, io.Discard)
 	report, err := svc.Run(context.Background(), 0, true) // dryRun=true
 	require.NoError(t, err)
 
@@ -64,7 +65,7 @@ func TestBackfillService_LimitHonored(t *testing.T) {
 		makeItemForBackfill(t, f, title, "content "+title)
 	}
 
-	svc := NewBackfillService(f.repo, f.svc)
+	svc := NewBackfillService(f.repo, f.svc, io.Discard)
 	report, err := svc.Run(context.Background(), 3, false) // limit=3
 	require.NoError(t, err)
 
@@ -88,7 +89,7 @@ func TestBackfillService_ContinuesOnEmbedFailure(t *testing.T) {
 		return [][]float32{make([]float32, 8)}, nil
 	})
 
-	svc := NewBackfillService(f.repo, f.svc)
+	svc := NewBackfillService(f.repo, f.svc, io.Discard)
 	report, err := svc.Run(context.Background(), 0, false)
 	require.NoError(t, err, "Run itself does not fail on per-item errors")
 

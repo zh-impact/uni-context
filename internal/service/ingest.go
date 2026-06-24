@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"unicode"
 
@@ -15,19 +15,23 @@ type IngestService struct {
 	repo  port.ContextRepo
 	fs    port.FileStore
 	embed *EmbedService // nil = embedding disabled (Plan 1 compat)
+	// log receives non-fatal warnings (reindex-fts failure, embed failure).
+	// Injected via constructor so tests can assert on warnings and the
+	// service has no direct os.Stderr coupling.
+	log io.Writer
 }
 
-func NewIngestService(repo port.ContextRepo, fs port.FileStore) *IngestService {
-	return &IngestService{repo: repo, fs: fs}
+func NewIngestService(repo port.ContextRepo, fs port.FileStore, log io.Writer) *IngestService {
+	return &IngestService{repo: repo, fs: fs, log: log}
 }
 
 // NewIngestServiceWithEmbedder wires an optional EmbedService. If embed
 // is nil, behavior is identical to NewIngestService (Plan 1: no vector
 // writes). When non-nil, Create embeds synchronously after a successful
-// repo.Create; embed failure is non-fatal (warned to stderr, item is
+// repo.Create; embed failure is non-fatal (warned to log, item is
 // still returned and FTS-searchable).
-func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, embed *EmbedService) *IngestService {
-	return &IngestService{repo: repo, fs: fs, embed: embed}
+func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, embed *EmbedService, log io.Writer) *IngestService {
+	return &IngestService{repo: repo, fs: fs, embed: embed, log: log}
 }
 
 // Input is the user-facing write request.
@@ -124,7 +128,7 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 	// index bug, which doesn't match how we treat embed failures.
 	if item.ContentURI != "" {
 		if err := s.repo.ReindexFTS(ctx, item.ID, item.Title, item.Summary, in.Content); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: reindex fts for %s: %v\n", item.ID, err)
+			fmt.Fprintf(s.log, "warn: reindex fts for %s: %v\n", item.ID, err)
 		}
 	}
 
@@ -138,7 +142,7 @@ func (s *IngestService) Create(ctx context.Context, in Input) (string, error) {
 	// hydrates from FileStore via item.ContentURI.
 	if s.embed != nil {
 		if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: embed failed for %s: %v\n", item.ID, err)
+			fmt.Fprintf(s.log, "warn: embed failed for %s: %v\n", item.ID, err)
 		}
 	}
 	return item.ID, nil
