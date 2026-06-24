@@ -58,3 +58,11 @@ type ProjectRepo interface {
 	List(ctx context.Context) ([]domain.Project, error)
 	Delete(ctx context.Context, id string) error
 }
+
+// SchemaMeta reads the schema_meta table. Used by DiagnosticService to
+// surface the active migration version in `unictx doctor` without the
+// CLI reaching into *sql.DB directly. Single-method for now — add rows
+// here if future diagnostics need schema_meta entries beyond 'schema_version'.
+type SchemaMeta interface {
+	Version(ctx context.Context) (string, error)
+}

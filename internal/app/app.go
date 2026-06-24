@@ -59,6 +59,11 @@ type App struct {
 	// (externalization-hydration policy lives here, not in the inbound layer).
 	Items *service.ItemService
 
+	// Diagnostics powers `unictx doctor`: schema version + embedder ping.
+	// Constructed unconditionally so the CLI never touches *sql.DB or
+	// port.Embedder directly for the doctor flow.
+	Diagnostics *service.DiagnosticService
+
 	// Registry is non-nil when cfg.Embedder.Enabled is true. CLI uses it
 	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
 	Registry port.ModelRegistry
@@ -179,6 +184,10 @@ func Wire(cfg *config.Config) (*App, error) {
 	// ItemService owns externalization hydration; unconditional so the CLI's
 	// read/delete paths go through a use case in every plan.
 	items := service.NewItemService(repo, fs)
+	// DiagnosticService owns the doctor command's schema-version lookup +
+	// embedder ping. Constructed unconditionally; embedder is nil when
+	// Plan 1 is active, and PingEmbedder reports disabled in that case.
+	diagnostics := service.NewDiagnosticService(sqlite.NewSchemaMetaRepo(db), embedder)
 
 	return &App{
 		Config:        cfg,
@@ -194,6 +203,7 @@ func Wire(cfg *config.Config) (*App, error) {
 		Reembed:       reembed,
 		ReindexFTS:    reindexFTS,
 		Items:         items,
+		Diagnostics:   diagnostics,
 		Registry:      registry,
 		Ingest:        ingest,
 		Search:        search,
