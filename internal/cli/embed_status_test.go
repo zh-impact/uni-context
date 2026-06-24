@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -96,23 +95,16 @@ func swapLoadAppFn(a *app.App) func() {
 	return func() { loadAppFn = prev }
 }
 
-// newStubApp returns a minimal *app.App with an in-memory *sql.DB set,
-// so the `defer a.Close()` line in every RunE handler does not panic
-// when the handler returns. The DB is closed via t.Cleanup. Tests
-// customize the relevant fields (Registry, EmbeddingRepo, Reembed) on
-// the returned App after construction.
-//
-// Why this matters: every embed RunE handler in embed.go registers
-// `defer a.Close()` immediately after loadApp() succeeds — BEFORE
-// the early-return `Registry == nil` / `EmbeddingRepo == nil` checks.
-// A stub App with nil DB would panic at the deferred Close when the
-// handler returns from the early-exit branch.
+// newStubApp returns a minimal *app.App suitable for RunE tests. The
+// infra fields (db, repo, searcher, ...) are unexported, so the cli
+// package cannot set them — and does not need to: every RunE handler
+// reads only the exported service fields (Models, Backfill, Worker,
+// Reembed, Items, Diagnostics, ...). App.Close handles a nil db, so the
+// `defer a.Close()` registered by every RunE handler is a no-op on the
+// early-exit branches.
 func newStubApp(t *testing.T) *app.App {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	return &app.App{DB: db}
+	return &app.App{}
 }
 
 // captureStdout swaps os.Stdout for a pipe, runs fn, then restores

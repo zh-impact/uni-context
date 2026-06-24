@@ -26,8 +26,8 @@ func TestWire_EmbedderEnabled_ConstructsEmbeddingRepo(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = a.Close() })
 
-	assert.NotNil(t, a.Embedder, "Embedder constructed when enabled")
-	assert.NotNil(t, a.EmbeddingRepo, "EmbeddingRepo constructed when enabled")
+	assert.NotNil(t, a.embedder, "Embedder constructed when enabled")
+	assert.NotNil(t, a.embRepo, "EmbeddingRepo constructed when enabled")
 	assert.NotNil(t, a.Ingest, "IngestService constructed")
 	assert.NotNil(t, a.Search, "SearchService constructed")
 	// Plan 2b Task 5: Backfill now wired when embedder is enabled.
@@ -37,7 +37,7 @@ func TestWire_EmbedderEnabled_ConstructsEmbeddingRepo(t *testing.T) {
 }
 
 func TestWire_EmbedderDisabled_LeavesEmbeddingFieldsNil(t *testing.T) {
-	// Plan 1 compat: no embedder construction; App.Backfill/Worker/Embedder
+	// Plan 1 compat: no embedder construction; App.Backfill/Worker/embedder
 	// all nil so CLI commands error cleanly without nil-deref.
 	dir := t.TempDir()
 	cfg := &config.Config{DataDir: dir}
@@ -46,8 +46,8 @@ func TestWire_EmbedderDisabled_LeavesEmbeddingFieldsNil(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = a.Close() })
 
-	assert.Nil(t, a.Embedder)
-	assert.Nil(t, a.EmbeddingRepo)
+	assert.Nil(t, a.embedder)
+	assert.Nil(t, a.embRepo)
 	assert.Nil(t, a.Backfill)
 	assert.Nil(t, a.Worker)
 }

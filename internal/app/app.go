@@ -21,20 +21,20 @@ import (
 // App is a fully wired application root: configuration plus all adapters
 // and services ready for the CLI to consume.
 type App struct {
-	Config   *config.Config
-	DB       *sql.DB
-	Repo     port.ContextRepo
-	Project  port.ProjectRepo
-	Searcher port.Searcher
-	FS       port.FileStore
+	Config *config.Config
 
-	// Embedder is non-nil when cfg.Embedder.Enabled is true. When nil,
-	// the app runs in Plan 1 mode (no vector indexing, search is fts-only).
-	Embedder port.Embedder
-
-	// EmbeddingRepo owns the context_embedding rows; non-nil only when
-	// Embedder is constructed. Plan 2b: status rows for async backfill.
-	EmbeddingRepo port.EmbeddingRepo
+	// Infra fields are unexported: the inbound layer (CLI) must reach the
+	// application through its services (Items, Ingest, Search, Diagnostics,
+	// Models, ...), not by touching ports or the *sql.DB handle directly.
+	// Same-package code (Wire, Close) can still read/write them.
+	db       *sql.DB
+	repo     port.ContextRepo
+	project  port.ProjectRepo
+	searcher port.Searcher
+	fs       port.FileStore
+	embedder port.Embedder // nil = Plan 1 (disabled)
+	embRepo  port.EmbeddingRepo
+	registry port.ModelRegistry
 
 	// Backfill is populated when the embedder is enabled; nil otherwise
 	// (Plan 1 / Plan 2a mode). Plan 2b Task 5: drives 'embed backfill'.
@@ -63,10 +63,6 @@ type App struct {
 	// Constructed unconditionally so the CLI never touches *sql.DB or
 	// port.Embedder directly for the doctor flow.
 	Diagnostics *service.DiagnosticService
-
-	// Registry is non-nil when cfg.Embedder.Enabled is true. CLI uses it
-	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
-	Registry port.ModelRegistry
 
 	// Models is the application-layer boundary for `embed model ...`,
 	// `embed switch`, and `embed status`. Constructed only when the
@@ -204,33 +200,33 @@ func Wire(cfg *config.Config) (*App, error) {
 	diagnostics := service.NewDiagnosticService(sqlite.NewSchemaMetaRepo(db), embedder)
 
 	return &App{
-		Config:        cfg,
-		DB:            db,
-		Repo:          repo,
-		Project:       proj,
-		Searcher:      searcher,
-		FS:            fs,
-		Embedder:      embedder,
-		EmbeddingRepo: embeddingRepo,
-		Backfill:      backfill,
-		Worker:        worker,
-		Reembed:       reembed,
-		ReindexFTS:    reindexFTS,
-		Items:         items,
-		Diagnostics:   diagnostics,
-		Registry:      registry,
-		Models:        models,
-		Ingest:        ingest,
-		Search:        search,
+		Config:      cfg,
+		db:          db,
+		repo:        repo,
+		project:     proj,
+		searcher:    searcher,
+		fs:          fs,
+		embedder:    embedder,
+		embRepo:     embeddingRepo,
+		Backfill:    backfill,
+		Worker:      worker,
+		Reembed:     reembed,
+		ReindexFTS:  reindexFTS,
+		Items:       items,
+		Diagnostics: diagnostics,
+		registry:    registry,
+		Models:      models,
+		Ingest:      ingest,
+		Search:      search,
 	}, nil
 }
 
 // Close releases resources held by the App (currently just the DB handle).
 // Idempotent: safe to call multiple times.
 func (a *App) Close() error {
-	if a.DB != nil {
-		err := a.DB.Close()
-		a.DB = nil
+	if a.db != nil {
+		err := a.db.Close()
+		a.db = nil
 		return err
 	}
 	return nil
