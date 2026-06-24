@@ -92,8 +92,20 @@ func (s *SearchService) Search(ctx context.Context, req SearchRequest) (SearchRe
 
 // searchFTSOnly is the Plan 1 retrieval path: FTS + repo hydrate + scope
 // /kind post-filter. Each result carries MatchedBy=["fts"].
+//
+// Over-fetches 3×limit (matching searchHybrid's FTS leg) so post-filter
+// trimming by scope/kind doesn't silently underfill the result set.
+// Without this, a query whose top-Limit BM25 hits are dominated by
+// out-of-scope items would return fewer than Limit results even when
+// more in-scope matches exist further down the ranking. Spec §5.2.
 func (s *SearchService) searchFTSOnly(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-	hits, err := s.searcher.SearchFTS(ctx, port.SearchQuery{Query: req.Query, Limit: req.Limit})
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	overFetch := limit * 3
+
+	hits, err := s.searcher.SearchFTS(ctx, port.SearchQuery{Query: req.Query, Limit: overFetch})
 	if err != nil {
 		return SearchResponse{}, fmt.Errorf("fts: %w", err)
 	}
@@ -103,6 +115,9 @@ func (s *SearchService) searchFTSOnly(ctx context.Context, req SearchRequest) (S
 
 	var out []SearchResult
 	for _, h := range hits {
+		if len(out) >= limit {
+			break
+		}
 		item, err := s.repo.Get(ctx, h.ID)
 		if err != nil {
 			// item was deleted between FTS row and now; skip
