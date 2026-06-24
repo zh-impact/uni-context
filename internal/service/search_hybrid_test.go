@@ -246,3 +246,57 @@ func TestSearchService_Hybrid_DegradesToFTSOnEmbedError(t *testing.T) {
 			"every result from a degraded hybrid search must be flagged fts-only")
 	}
 }
+
+// TestSearchService_Hybrid_FTSFailureReturnsVectorOnly is the regression
+// guard for the asymmetric error-handling bug. The vector-failure path
+// was graceful (warn + fall back to fts-only), but the FTS-failure path
+// returned the error verbatim and discarded the already-fetched vector
+// hits — wasting the embed + KNN work. The fix: when FTS fails, warn
+// and proceed with vector-only fusion, mirroring the vector-failure path.
+//
+// Setup: stub Searcher whose SearchVector returns one canned hit and
+// whose SearchFTS returns an error. The response must:
+//   - not propagate the FTS error
+//   - contain the vector hit
+//   - flag the hit as MatchedBy=["vector"] only
+func TestSearchService_Hybrid_FTSFailureReturnsVectorOnly(t *testing.T) {
+	repo := newFakeRepo()
+	item := domain.ContextItem{
+		ID: "vec-hit-1", Scope: domain.ScopeUser, Kind: domain.KindNote,
+		Title: "vector only", Tags: []string{},
+	}
+	require.NoError(t, repo.Create(context.Background(), item))
+
+	searcher := &stubSearcher{
+		vecHits: []port.VectorHit{{ID: "vec-hit-1", Distance: 0.1, Score: 0.95}},
+		ftsErr:  fmt.Errorf("simulated FTS index corruption"),
+	}
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+
+	resp, err := svc.Search(context.Background(), SearchRequest{
+		Query: "anything", Mode: SearchModeHybrid, Limit: 5,
+	})
+	require.NoError(t, err, "FTS failure must not propagate; vector results should still be returned")
+	require.Len(t, resp.Results, 1, "vector hit must survive FTS failure")
+	assert.Equal(t, "vec-hit-1", resp.Results[0].Item.ID)
+	assert.Equal(t, []string{"vector"}, resp.Results[0].MatchedBy,
+		"result must be flagged as vector-only when FTS failed")
+}
+
+// stubSearcher is a port.Searcher with controllable behavior. Used to
+// exercise error paths in searchHybrid without a real sqlite backend.
+type stubSearcher struct {
+	vecHits []port.VectorHit
+	vecErr  error
+	ftsHits []port.SearchHit
+	ftsErr  error
+}
+
+func (s *stubSearcher) SearchFTS(_ context.Context, _ port.SearchQuery) ([]port.SearchHit, error) {
+	return s.ftsHits, s.ftsErr
+}
+
+func (s *stubSearcher) SearchVector(_ context.Context, _ port.VectorQuery) ([]port.VectorHit, error) {
+	return s.vecHits, s.vecErr
+}

@@ -179,7 +179,14 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 
 	fHits, err := s.searcher.SearchFTS(ctx, port.SearchQuery{Query: req.Query, Limit: overFetch})
 	if err != nil {
-		return SearchResponse{}, fmt.Errorf("fts search: %w", err)
+		// Symmetric with the vector-failure path above: warn + proceed
+		// with what we have. Discarding vHits would waste the embed +
+		// KNN work already done. Setting fHits to nil makes the FTS
+		// fusion loop a no-op; the vector loop still scores its hits,
+		// and the final trim to `limit` returns them as MatchedBy=
+		// ["vector"]-only.
+		fmt.Fprintf(os.Stderr, "warn: hybrid search fts failed, continuing with vector-only results: %v\n", err)
+		fHits = nil
 	}
 
 	// RRF: score = Σ 1/(rank + K). Items in both lists get two contributions.
