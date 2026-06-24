@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 //go:embed migrations/*.sql
@@ -101,7 +102,31 @@ func execMigration(db *sql.DB, fname, body string) error {
 	}
 	if _, err := tx.Exec(body); err != nil {
 		_ = tx.Rollback()
-		return fmt.Errorf("exec migration %s: %w", fname, err)
+		return wrapMigrationErr(fname, err)
 	}
 	return tx.Commit()
+}
+
+// wrapMigrationErr attaches the migration filename to a tx.Exec error.
+// When the underlying error indicates the FTS5 module is missing (i.e.,
+// the binary was built without -tags sqlite_fts5), the wrapped error
+// surfaces an actionable hint instead of SQLite's bare "no such module:
+// fts5" — otherwise users running `go test ./...` without the tag see
+// an opaque SQLite internal error and have no idea how to fix it.
+//
+// errors.Is against the original error still works (the original is
+// wrapped via %w), so callers that special-case specific sqlite errors
+// keep working.
+func wrapMigrationErr(fname string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "no such module: fts5") {
+		return fmt.Errorf(
+			"exec migration %s: SQLite was built without FTS5 — "+
+				"rebuild with -tags sqlite_fts5 (see Makefile / CLAUDE.md); "+
+				"underlying error: %w",
+			fname, err)
+	}
+	return fmt.Errorf("exec migration %s: %w", fname, err)
 }

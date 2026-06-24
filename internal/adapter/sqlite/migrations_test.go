@@ -2,12 +2,48 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestWrapMigrationErr_FTS5MissingHint: when the underlying Exec error
+// indicates SQLite was built without FTS5, the wrapped error must carry
+// an actionable hint pointing at the build tag — so users running
+// `go test ./...` without -tags sqlite_fts5 see "rebuild with
+// -tags sqlite_fts5" instead of SQLite's bare "no such module: fts5".
+func TestWrapMigrationErr_FTS5MissingHint(t *testing.T) {
+	orig := errors.New("no such module: fts5")
+	err := wrapMigrationErr("0001_init.sql", orig)
+	require.Error(t, err)
+	s := err.Error()
+	assert.Contains(t, s, "0001_init.sql")
+	assert.Contains(t, s, "sqlite_fts5", "must point at the build tag fix")
+	assert.Contains(t, s, "no such module: fts5", "underlying error must remain wrapped/visible")
+	assert.ErrorIs(t, err, orig, "errors.Is must still match the original")
+}
+
+// TestWrapMigrationErr_PlainErrorUnchanged: non-FTS5 errors pass through
+// with the historical "exec migration <fname>" prefix and no FTS5 hint.
+func TestWrapMigrationErr_PlainErrorUnchanged(t *testing.T) {
+	orig := errors.New("syntax error near (")
+	err := wrapMigrationErr("0042_x.sql", orig)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "sqlite_fts5",
+		"non-FTS5 errors must not get the build-tag hint")
+	assert.ErrorIs(t, err, orig)
+	assert.Contains(t, err.Error(), "0042_x.sql")
+}
+
+func TestWrapMigrationErr_NilReturnsNil(t *testing.T) {
+	// Defensive: callers may not all check nil before calling. The helper
+	// returns nil so `return wrapMigrationErr(...)` is safe even when the
+	// underlying call succeeded.
+	require.NoError(t, wrapMigrationErr("0001_init.sql", nil))
+}
 
 func TestMigrations_RunOnFreshDB(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
