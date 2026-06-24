@@ -174,3 +174,42 @@ func TestVectorStore_RealDimension(t *testing.T) {
 	assert.Equal(t, id, hits[0].ID)
 	assert.Greater(t, hits[0].Score, 0.0)
 }
+
+// TestVectorStore_Search_ReturnsAtMostLimit is the regression guard for
+// the double over-fetch bug. VectorStore.Search used to multiply q.Limit
+// by 3 internally ("fetchN := q.Limit * 3"), under the assumption that
+// the caller would post-filter the results. But scope/kind filters are
+// already pushed down to SQL via JOIN context_item — there is no
+// post-filter inside VectorStore. The service layer (searchHybrid) is
+// the correct place for over-fetch; it passes Limit=limit*3, and
+// VectorStore must honor that verbatim.
+//
+// Without the fix: Limit=4 with 12 indexed items returned 12 hits
+// (fetchN = 4*3 = 12). With the fix: returns 4 hits.
+func TestVectorStore_Search_ReturnsAtMostLimit(t *testing.T) {
+	vs, repo := newVectorStoreFixture(t)
+	ctx := context.Background()
+
+	// Put 12 items, each at a unique one-hot index so KNN can order them.
+	// Querying with e_0 ranks item0 closest, items 1-11 equidistant
+	// (orthogonal one-hot => same cosine distance from e_0).
+	for i := range 12 {
+		id := putItem(t, repo, "item")
+		require.NoError(t, vs.Put(ctx, "bge-m3", id, vec1024(struct {
+			idx int
+			val float32
+		}{i, 1.0})))
+	}
+
+	hits, err := vs.Search(ctx, port.VectorQuery{
+		Vector: vec1024(struct {
+			idx int
+			val float32
+		}{0, 1.0}),
+		Model: "bge-m3",
+		Limit: 4,
+	})
+	require.NoError(t, err)
+	assert.Len(t, hits, 4,
+		"VectorStore.Search must return at most q.Limit hits; got %d (double over-fetch bug?)", len(hits))
+}

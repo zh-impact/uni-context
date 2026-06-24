@@ -124,8 +124,10 @@ func (s *SearchService) searchFTSOnly(ctx context.Context, req SearchRequest) (S
 
 // searchHybrid runs vector KNN and FTS sequentially, then
 // fuses via RRF. Over-fetches 3×limit from each path so post-filter
-// trimming still yields req.Limit results. The fused map is trimmed to
-// req.Limit at the end (VectorStore pre-trims to 3×limit, not to limit).
+// trimming (by scope/kind on the FTS leg, and the RRF fusion trim on
+// both legs) still yields req.Limit results. The fused map is trimmed
+// to req.Limit at the end. VectorStore honors Limit verbatim — the
+// over-fetch lives here at the orchestration layer, per spec §5.2.
 func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	limit := req.Limit
 	if limit <= 0 {

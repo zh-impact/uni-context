@@ -81,13 +81,14 @@ func (s *VectorStore) Search(ctx context.Context, q port.VectorQuery) ([]port.Ve
 		q.Limit = 20
 	}
 
-	// Over-fetch 3× when filters narrow, so post-filter we still have
-	// enough hits. This matches the spec §5.2 strategy.
-	fetchN := q.Limit * 3
-	if fetchN > 200 {
-		fetchN = 200
-	}
-
+	// q.Limit is used directly as the KNN k. The service layer
+	// (searchHybrid) is responsible for over-fetch — it passes
+	// Limit=limit*3 from the orchestration layer per spec §5.2.
+	// VectorStore must NOT multiply again: scope/kind filters are pushed
+	// down via JOIN context_item, so there is no post-filter inside this
+	// function that would require headroom. (Prior to this fix,
+	// fetchN=q.Limit*3 made the effective k = limit*9 at the service
+	// layer — 180 KNN rows + 180 repo.Get calls for default limit=20.)
 	var (
 		filterSQL string
 		args      []any
@@ -113,7 +114,7 @@ func (s *VectorStore) Search(ctx context.Context, q port.VectorQuery) ([]port.Ve
 		}
 		filterSQL = " AND " + joinAnd(clauses)
 	}
-	args = append(args, fetchN)
+	args = append(args, q.Limit)
 	query := fmt.Sprintf(`
         SELECT v.item_id, v.distance
         FROM %s v
