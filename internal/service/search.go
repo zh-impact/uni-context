@@ -285,8 +285,12 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
 		}
-		// Stable tiebreak: lower ID first so test output is deterministic.
-		return out[i].Item.ID < out[j].Item.ID
+		// Stable tiebreak: higher ULID first = newer item first. IDs are
+		// ULIDs (timestamp-prefixed, lexically sortable), so a lexical
+		// descending compare is a creation-time descending compare. On a
+		// score tie the more recently created item wins — for a personal
+		// KB the recent note is more likely what the user wants.
+		return out[i].Item.ID > out[j].Item.ID
 	})
 	if len(out) > limit {
 		out = out[:limit]

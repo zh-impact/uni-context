@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -282,6 +283,63 @@ func TestSearchService_Hybrid_FTSFailureReturnsVectorOnly(t *testing.T) {
 	assert.Equal(t, "vec-hit-1", resp.Results[0].Item.ID)
 	assert.Equal(t, []string{"vector"}, resp.Results[0].MatchedBy,
 		"result must be flagged as vector-only when FTS failed")
+}
+
+// TestSearchService_Hybrid_TiebreakPrefersNewer is the regression guard
+// for the sort tiebreak direction. The RRF sort used to break score ties
+// by `Item.ID < Item.ID` (ULID dictionary order = older item first). For
+// a personal-knowledge base the more useful tiebreak is newer-first: when
+// two items are equally relevant, the recent one is more likely what the
+// user is looking for.
+//
+// Setup: two real items created via NewContextItem so their ULIDs reflect
+// creation time. stubSearcher returns hits so each item lands at fts-rank
+// i and vector-rank (1-i), giving both the identical RRF score
+// 1/(0+60) + 1/(1+60). Empty scopes/kinds so no filter interferes.
+func TestSearchService_Hybrid_TiebreakPrefersNewer(t *testing.T) {
+	repo := newFakeRepo()
+
+	older, _ := domain.NewContextItem(domain.ScopeUser, domain.KindNote, domain.SourceManual,
+		domain.NewItemParams{OwnerUserID: "u"})
+	require.NoError(t, repo.Create(context.Background(), older))
+
+	// Sleep past ULID timestamp granularity so newer.ID > older.ID lexically.
+	time.Sleep(15 * time.Millisecond)
+
+	newer, _ := domain.NewContextItem(domain.ScopeUser, domain.KindNote, domain.SourceManual,
+		domain.NewItemParams{OwnerUserID: "u"})
+	require.NoError(t, repo.Create(context.Background(), newer))
+	require.Greater(t, newer.ID, older.ID,
+		"newer ULID must sort after older for this test to be meaningful")
+
+	// Crossed ranks: older=[fts0, vec1], newer=[fts1, vec0].
+	// Both score 1/60 + 1/61 → genuine tie → tiebreak decides.
+	searcher := &stubSearcher{
+		ftsHits: []port.SearchHit{
+			{ID: older.ID, Score: 2.0, Snippet: "older"},
+			{ID: newer.ID, Score: 1.0, Snippet: "newer"},
+		},
+		vecHits: []port.VectorHit{
+			{ID: newer.ID, Distance: 0.1, Score: 0.95},
+			{ID: older.ID, Distance: 0.2, Score: 0.90},
+		},
+	}
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+
+	resp, err := svc.Search(context.Background(), SearchRequest{
+		Query: "x", Mode: SearchModeHybrid, Limit: 5,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Results, 2)
+
+	// Sanity: the test setup must produce a real tie, not a near-tie.
+	assert.InDelta(t, resp.Results[0].Score, resp.Results[1].Score, 1e-9,
+		"fts rank 0 + vec rank 1 must equal fts rank 1 + vec rank 0")
+
+	assert.Equal(t, newer.ID, resp.Results[0].Item.ID,
+		"on score tie, newer item (higher ULID) must rank first")
+	assert.Equal(t, older.ID, resp.Results[1].Item.ID)
 }
 
 // stubSearcher is a port.Searcher with controllable behavior. Used to
