@@ -77,9 +77,11 @@ func (s *VectorStore) Search(ctx context.Context, q port.VectorQuery) ([]port.Ve
 	if err != nil {
 		return nil, fmt.Errorf("serialize query vector: %w", err)
 	}
-	if q.Limit <= 0 || q.Limit > 200 {
-		q.Limit = 20
-	}
+	// Clamp rather than reset: service-layer over-fetch passes Limit=limit*3
+	// (e.g. 300 for user-requested limit=100); resetting that to 20 destroyed
+	// recall. Clamp to maxLimit (200) preserves the caller's over-fetch
+	// headroom without unbounding the KNN k parameter.
+	q.Limit = clampLimit(q.Limit)
 
 	// q.Limit is used directly as the KNN k. The service layer
 	// (searchHybrid) is responsible for over-fetch — it passes

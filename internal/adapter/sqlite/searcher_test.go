@@ -219,6 +219,48 @@ func TestSearcher_FTS_LongQueryStillUsesFTS(t *testing.T) {
 	assert.NotEmpty(t, hits[0].Snippet, "3-char query must use FTS path (snippet non-empty)")
 }
 
+// TestSearcher_FTS_LimitAbove200ClampedNotReset: same regression as
+// TestVectorStore_Search_LimitAbove200ClampedNotReset but on the FTS
+// path. The service-layer over-fetch (search.go overFetch = limit*3)
+// passes Limit=300 for a user-requested limit=100. The buggy
+// conditional reset that to 20; the fix clamps to 200. We index 30
+// items that all share a 3-char FTS-matchable substring and verify all
+// 30 are returned (buggy code would return 20).
+func TestSearcher_FTS_LimitAbove200ClampedNotReset(t *testing.T) {
+	items := make([]domain.ContextItem, 0, 30)
+	for range 30 {
+		// "部署 X" is 4 runes — well above the trigram minimum — and
+		// every item carries the same 3-char prefix "部署 " so the
+		// FTS phrase match finds all 30.
+		items = append(items, makeItem("部署 部署", "部署 shared"))
+	}
+	db := openMemWithSampleData(t, items)
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "部署 ", Limit: 300})
+	require.NoError(t, err)
+	assert.Len(t, hits, 30,
+		"FTS Limit=300 must clamp to 200 (not reset to 20) and return all 30 matches; got %d", len(hits))
+}
+
+// TestSearcher_LikeFallback_LimitAbove200ClampedNotReset: same
+// regression guard on the LIKE fallback path (2-char CJK queries that
+// fall below the trigram minimum).
+func TestSearcher_LikeFallback_LimitAbove200ClampedNotReset(t *testing.T) {
+	items := make([]domain.ContextItem, 0, 30)
+	for range 30 {
+		// "部署" is 2 chars (6 UTF-8 bytes) -> triggers LIKE fallback.
+		items = append(items, makeItem("部署", "shared content"))
+	}
+	db := openMemWithSampleData(t, items)
+	s := NewSearcher(db)
+
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "部署", Limit: 300})
+	require.NoError(t, err)
+	assert.Len(t, hits, 30,
+		"LIKE Limit=300 must clamp to 200 (not reset to 20) and return all 30 matches; got %d", len(hits))
+}
+
 // getHitContent fetches the content column for an item ID. Used by LIKE
 // fallback tests to assert which row matched.
 func getHitContent(t *testing.T, db *sql.DB, id string) string {

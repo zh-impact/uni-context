@@ -213,3 +213,65 @@ func TestVectorStore_Search_ReturnsAtMostLimit(t *testing.T) {
 	assert.Len(t, hits, 4,
 		"VectorStore.Search must return at most q.Limit hits; got %d (double over-fetch bug?)", len(hits))
 }
+
+// TestVectorStore_Search_LimitAbove200ClampedNotReset is the regression
+// guard for the limit-clamp bug. The service layer passes Limit=limit*3
+// (search.go over-fetch); when the user requests limit=100, VectorStore
+// sees q.Limit=300. The buggy conditional `if q.Limit > 200 { q.Limit = 20 }`
+// reset this to 20 (catastrophic recall loss). The fix clamps to 200 —
+// still well above the user's requested 100 — so all 30 indexed items
+// are returned here. Buggy code would return only 20.
+func TestVectorStore_Search_LimitAbove200ClampedNotReset(t *testing.T) {
+	vs, repo := newVectorStoreFixture(t)
+	ctx := context.Background()
+
+	// 30 items: > 20 (buggy reset value) but < 200 (clamp ceiling), so
+	// the test cleanly distinguishes reset-to-20 from clamp-to-200.
+	for i := range 30 {
+		id := putItem(t, repo, "item")
+		require.NoError(t, vs.Put(ctx, "bge-m3", id, vec1024(struct {
+			idx int
+			val float32
+		}{i, 1.0})))
+	}
+
+	hits, err := vs.Search(ctx, port.VectorQuery{
+		Vector: vec1024(struct {
+			idx int
+			val float32
+		}{0, 1.0}),
+		Model: "bge-m3",
+		Limit: 300, // service-layer over-fetch value
+	})
+	require.NoError(t, err)
+	assert.Len(t, hits, 30,
+		"Limit=300 must clamp to 200 (not reset to 20) and return all 30 indexed items; got %d", len(hits))
+}
+
+// TestVectorStore_Search_LimitZeroDefaultsTo20 verifies the <=0 branch
+// still picks the default. After the fix, only the <=0 path sets 20 —
+// positive values are never silently reset to 20.
+func TestVectorStore_Search_LimitZeroDefaultsTo20(t *testing.T) {
+	vs, repo := newVectorStoreFixture(t)
+	ctx := context.Background()
+
+	for i := range 30 {
+		id := putItem(t, repo, "item")
+		require.NoError(t, vs.Put(ctx, "bge-m3", id, vec1024(struct {
+			idx int
+			val float32
+		}{i, 1.0})))
+	}
+
+	hits, err := vs.Search(ctx, port.VectorQuery{
+		Vector: vec1024(struct {
+			idx int
+			val float32
+		}{0, 1.0}),
+		Model: "bge-m3",
+		Limit: 0, // unset -> default 20
+	})
+	require.NoError(t, err)
+	assert.Len(t, hits, 20,
+		"Limit=0 must default to 20; got %d", len(hits))
+}

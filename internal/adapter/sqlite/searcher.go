@@ -87,10 +87,7 @@ func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.Se
 	if ftsq == "" {
 		return nil, nil
 	}
-	limit := q.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 20
-	}
+	limit := clampLimit(q.Limit)
 
 	rows, err := s.db.QueryContext(ctx, searchSQL, ftsq, limit)
 	if err != nil {
@@ -154,9 +151,7 @@ func likePattern(raw string) string {
 // searchLike runs the LIKE fallback for short queries. Empty snippet is
 // intentional — callers fall back to item.Title for display.
 func (s *Searcher) searchLike(ctx context.Context, query string, limit int) ([]port.SearchHit, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 20
-	}
+	limit = clampLimit(limit)
 	pattern := likePattern(query)
 	rows, err := s.db.QueryContext(ctx, likeSearchSQL, pattern, pattern, pattern, limit)
 	if err != nil {
