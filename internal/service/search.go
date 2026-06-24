@@ -108,6 +108,54 @@ func (s *SearchService) Search(ctx context.Context, req SearchRequest) (SearchRe
 	return s.searchHybrid(ctx, req)
 }
 
+// searchFilters bundles the scope/kind acceptance sets built from a
+// SearchRequest. A nil set means "all match" — an empty Scopes slice
+// produces a filter that accepts every scope. searchFTSOnly and both
+// legs of searchHybrid build one of these from the request; the
+// .accepts method replaces the duplicated `scopes[item.Scope]` /
+// `kinds[item.Kind]` checks that used to live inline in each loop.
+type searchFilters struct {
+	scopes map[domain.Scope]bool
+	kinds  map[domain.Kind]bool
+}
+
+func newSearchFilters(scopes []domain.Scope, kinds []domain.Kind) searchFilters {
+	return searchFilters{scopes: scopeSet(scopes), kinds: kindSet(kinds)}
+}
+
+func (f searchFilters) accepts(item domain.ContextItem) bool {
+	if f.scopes != nil && !f.scopes[item.Scope] {
+		return false
+	}
+	if f.kinds != nil && !f.kinds[item.Kind] {
+		return false
+	}
+	return true
+}
+
+// hydrate fetches an item by ID, caching the result in cache (if non-nil).
+// Both legs of hybrid search hydrate overlapping ID sets, so the cache
+// dedupes repo.Get calls within one Search invocation. searchFTSOnly
+// passes a nil cache (single leg, no reuse) — the nil-check makes that
+// a no-op rather than requiring a separate code path.
+func (s *SearchService) hydrate(ctx context.Context, id string, cache map[string]domain.ContextItem) (domain.ContextItem, bool) {
+	if cache != nil {
+		if item, ok := cache[id]; ok {
+			return item, true
+		}
+	}
+	item, err := s.repo.Get(ctx, id)
+	if err != nil {
+		// Item was deleted between the FTS/vector row being written and
+		// now; caller skips. Not cached — a later retry would still 404.
+		return domain.ContextItem{}, false
+	}
+	if cache != nil {
+		cache[id] = item
+	}
+	return item, true
+}
+
 // searchFTSOnly is the Plan 1 retrieval path: FTS + repo hydrate + scope
 // /kind post-filter. Each result carries MatchedBy=["fts"].
 //
@@ -128,23 +176,18 @@ func (s *SearchService) searchFTSOnly(ctx context.Context, req SearchRequest) (S
 		return SearchResponse{}, fmt.Errorf("fts: %w", err)
 	}
 
-	scopes := scopeSet(req.Scopes)
-	kinds := kindSet(req.Kinds)
+	filters := newSearchFilters(req.Scopes, req.Kinds)
 
 	var out []SearchResult
 	for _, h := range hits {
 		if len(out) >= limit {
 			break
 		}
-		item, err := s.repo.Get(ctx, h.ID)
-		if err != nil {
-			// item was deleted between FTS row and now; skip
+		item, ok := s.hydrate(ctx, h.ID, nil)
+		if !ok {
 			continue
 		}
-		if scopes != nil && !scopes[item.Scope] {
-			continue
-		}
-		if kinds != nil && !kinds[item.Kind] {
+		if !filters.accepts(item) {
 			continue
 		}
 		out = append(out, SearchResult{
@@ -225,8 +268,7 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	}
 	fused := map[string]*fusion{}
 
-	scopesFilter := scopeSet(req.Scopes)
-	kindsFilter := kindSet(req.Kinds)
+	filters := newSearchFilters(req.Scopes, req.Kinds)
 
 	// Cache hydrated items so IDs appearing in both FTS and vector
 	// results only trigger one repo.Get call.
@@ -241,15 +283,11 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	// hit contributes 1/60.
 	survivingRank := 0
 	for _, h := range fHits {
-		item, err := s.repo.Get(ctx, h.ID)
-		if err != nil {
+		item, ok := s.hydrate(ctx, h.ID, itemCache)
+		if !ok {
 			continue
 		}
-		itemCache[h.ID] = item
-		if scopesFilter != nil && !scopesFilter[item.Scope] {
-			continue
-		}
-		if kindsFilter != nil && !kindsFilter[item.Kind] {
+		if !filters.accepts(item) {
 			continue
 		}
 		f, ok := fused[h.ID]
@@ -274,19 +312,11 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	// footing. Same survivingRank pattern as the FTS loop.
 	survivingVecRank := 0
 	for _, h := range vHits {
-		item, ok := itemCache[h.ID]
+		item, ok := s.hydrate(ctx, h.ID, itemCache)
 		if !ok {
-			var err error
-			item, err = s.repo.Get(ctx, h.ID)
-			if err != nil {
-				continue
-			}
-			itemCache[h.ID] = item
-		}
-		if scopesFilter != nil && !scopesFilter[item.Scope] {
 			continue
 		}
-		if kindsFilter != nil && !kindsFilter[item.Kind] {
+		if !filters.accepts(item) {
 			continue
 		}
 		f, ok := fused[h.ID]
