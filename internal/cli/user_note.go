@@ -133,7 +133,7 @@ var userNoteListCmd = &cobra.Command{
 		if noteLimit <= 0 {
 			noteLimit = 20
 		}
-		items, _, err := a.Repo.List(cmd.Context(), port.ItemFilter{
+		items, _, err := a.Items.List(cmd.Context(), port.ItemFilter{
 			Scopes:      []domain.Scope{domain.ScopeUser},
 			OwnerUserID: cfg.User.ID,
 			Kinds:       []domain.Kind{domain.KindNote},
@@ -177,18 +177,11 @@ var userNoteGetCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		item, err := a.Repo.Get(cmd.Context(), args[0])
+		item, err := a.Items.Get(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
 		content := item.Content
-		if content == "" && item.ContentURI != "" {
-			data, err := a.FS.Get(item.ContentURI)
-			if err != nil {
-				return fmt.Errorf("load external content: %w", err)
-			}
-			content = string(data)
-		}
 		if flagJSON {
 			printJSON(map[string]any{
 				"id":         item.ID,
@@ -220,7 +213,7 @@ var userNoteDeleteCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if err := a.Repo.Delete(cmd.Context(), args[0]); err != nil {
+		if err := a.Items.Delete(cmd.Context(), args[0]); err != nil {
 			return err
 		}
 		if flagJSON {

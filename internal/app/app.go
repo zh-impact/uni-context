@@ -53,6 +53,12 @@ type App struct {
 	// unconditionally because FTS search is available in Plan 1 too.
 	ReindexFTS *service.ReindexFTSService
 
+	// Items is the query-side use case: hydrated Get + List + Delete over
+	// context items. Constructed unconditionally so the CLI reads items
+	// through a service rather than reaching into Repo + FS ports directly
+	// (externalization-hydration policy lives here, not in the inbound layer).
+	Items *service.ItemService
+
 	// Registry is non-nil when cfg.Embedder.Enabled is true. CLI uses it
 	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
 	Registry port.ModelRegistry
@@ -170,6 +176,9 @@ func Wire(cfg *config.Config) (*App, error) {
 	// ReindexFTS is constructed unconditionally — the FTS gap is not
 	// embedder-dependent (Plan 1 FTS-only users hit it too).
 	reindexFTS := service.NewReindexFTSService(repo, fs)
+	// ItemService owns externalization hydration; unconditional so the CLI's
+	// read/delete paths go through a use case in every plan.
+	items := service.NewItemService(repo, fs)
 
 	return &App{
 		Config:        cfg,
@@ -184,6 +193,7 @@ func Wire(cfg *config.Config) (*App, error) {
 		Worker:        worker,
 		Reembed:       reembed,
 		ReindexFTS:    reindexFTS,
+		Items:         items,
 		Registry:      registry,
 		Ingest:        ingest,
 		Search:        search,
