@@ -300,3 +300,55 @@ func (s *stubSearcher) SearchFTS(_ context.Context, _ port.SearchQuery) ([]port.
 func (s *stubSearcher) SearchVector(_ context.Context, _ port.VectorQuery) ([]port.VectorHit, error) {
 	return s.vecHits, s.vecErr
 }
+
+// TestSearchService_Hybrid_FTSRankIsPostFilter is the regression guard
+// for the rank-semantics asymmetry. The FTS fusion loop used to use the
+// raw `for rank, h := range fHits` index, but fHits comes back
+// UNFILTERED — scope/kind filtering happens in Go after hydration. So
+// if N items are filtered before item X, X's RRF contribution was
+// 1/(N+60) instead of 1/60. The vector loop is post-filter (filters
+// push down via JOIN), so vector ranks were already correct.
+//
+// Setup: stub returns fHits = [g1(global,rank0), g2(global,rank1),
+// u1(user,rank2)]. Scopes=[user] drops g1+g2. u1 should score as the
+// post-filter rank-0 item (1/60), not the pre-filter rank-2 item
+// (1/62). Empty vHits isolates the FTS contribution for the assertion.
+func TestSearchService_Hybrid_FTSRankIsPostFilter(t *testing.T) {
+	repo := newFakeRepo()
+	for _, it := range []domain.ContextItem{
+		{ID: "g1", Scope: domain.ScopeGlobal, Kind: domain.KindDoc, Tags: []string{}},
+		{ID: "g2", Scope: domain.ScopeGlobal, Kind: domain.KindDoc, Tags: []string{}},
+		{ID: "u1", Scope: domain.ScopeUser, Kind: domain.KindNote, Tags: []string{}},
+	} {
+		require.NoError(t, repo.Create(context.Background(), it))
+	}
+
+	searcher := &stubSearcher{
+		ftsHits: []port.SearchHit{
+			{ID: "g1", Score: 3.0},
+			{ID: "g2", Score: 2.0},
+			{ID: "u1", Score: 1.0},
+		},
+		// vecHits empty: isolates FTS contribution in u1's final score.
+	}
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+
+	resp, err := svc.Search(context.Background(), SearchRequest{
+		Query:  "x",
+		Scopes: []domain.Scope{domain.ScopeUser},
+		Mode:   SearchModeHybrid,
+		Limit:  5,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Results, 1, "only u1 should survive scope filter")
+	assert.Equal(t, "u1", resp.Results[0].Item.ID)
+
+	// Post-filter rank 0 → contribution 1/(0+60) = 1/60.
+	// Pre-filter rank 2 (the bug) → 1/(2+60) = 1/62.
+	// Difference is ~0.00054, well outside float64 noise; 1e-9 tolerance.
+	wantScore := 1.0 / float64(0+rrfK)
+	assert.InDelta(t, wantScore, resp.Results[0].Score, 1e-9,
+		"u1 must score as post-filter rank 0 (1/60=%.6f); got %.6f (pre-filter rank 2 = 1/62=%.6f)",
+		wantScore, resp.Results[0].Score, 1.0/62.0)
+}

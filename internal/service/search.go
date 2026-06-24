@@ -205,9 +205,15 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	// results only trigger one repo.Get call.
 	itemCache := map[string]domain.ContextItem{}
 
-	// Hydrate + score FTS hits. rank is 0-indexed; contribution uses
-	// 1/(rank+rrfK) so the top FTS hit contributes 1/60.
-	for rank, h := range fHits {
+	// Hydrate + score FTS hits. survivingRank is 0-indexed and only
+	// increments when an item passes the scope/kind filter — fHits comes
+	// back UNFILTERED (FTS5 query has no scope/kind predicates), so the
+	// raw range index would assign unfairly high ranks to in-scope items
+	// that happened to land below out-of-scope items in BM25 order. RRF
+	// contribution is 1/(survivingRank+rrfK), so the top surviving FTS
+	// hit contributes 1/60.
+	survivingRank := 0
+	for _, h := range fHits {
 		item, err := s.repo.Get(ctx, h.ID)
 		if err != nil {
 			continue
@@ -224,16 +230,23 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 			f = &fusion{item: item}
 			fused[h.ID] = f
 		}
-		f.score += 1.0 / float64(rank+rrfK)
+		f.score += 1.0 / float64(survivingRank+rrfK)
 		f.matchedBy = append(f.matchedBy, "fts")
 		if f.snippet == "" {
 			f.snippet = h.Snippet
 		}
+		survivingRank++
 	}
 
 	// Hydrate + score vector hits. Vector search has no snippet text;
 	// fall back to the item title so the UI has something to show.
-	for rank, h := range vHits {
+	// vHits is already filtered at SQL level via JOIN context_item, so
+	// the defensive filter below should be a no-op — but if it ever
+	// fires (race between SQL query and item update), we still want
+	// post-filter rank semantics so vector and FTS contribute on equal
+	// footing. Same survivingRank pattern as the FTS loop.
+	survivingVecRank := 0
+	for _, h := range vHits {
 		item, ok := itemCache[h.ID]
 		if !ok {
 			var err error
@@ -254,11 +267,12 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 			f = &fusion{item: item}
 			fused[h.ID] = f
 		}
-		f.score += 1.0 / float64(rank+rrfK)
+		f.score += 1.0 / float64(survivingVecRank+rrfK)
 		f.matchedBy = append(f.matchedBy, "vector")
 		if f.snippet == "" {
 			f.snippet = item.Title
 		}
+		survivingVecRank++
 	}
 
 	out := make([]SearchResult, 0, len(fused))
