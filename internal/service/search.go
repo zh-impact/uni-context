@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
@@ -16,6 +17,23 @@ type SearchService struct {
 	// embedder is required for hybrid mode. When nil, a hybrid request
 	// silently degrades to fts-only (Plan 1 callers are unaffected).
 	embedder port.Embedder
+	// legTimeout bounds each retrieval leg (vector KNN, FTS) in
+	// searchHybrid. Zero (the default for both constructors) means
+	// legTimeoutOrDefault applies. A hung leg (vec0 corruption, FTS5
+	// tokenizer spin) is cancelled and the existing per-leg fallback
+	// path fires instead of blocking the whole search.
+	legTimeout time.Duration
+}
+
+// legTimeoutOrDefault returns the configured per-leg timeout, defaulting
+// to 5s when legTimeout is zero. 5s is generous for local sqlite lookups
+// (typical KNN + FTS is <100ms) but bounded enough that a wedged leg
+// doesn't make the CLI feel frozen.
+func (s *SearchService) legTimeoutOrDefault() time.Duration {
+	if s.legTimeout > 0 {
+		return s.legTimeout
+	}
+	return 5 * time.Second
 }
 
 // NewSearchService wires the fts-only SearchService (Plan 1 shape). Mode
@@ -168,16 +186,25 @@ func (s *SearchService) searchHybrid(ctx context.Context, req SearchRequest) (Se
 	scopes := toStrings(req.Scopes)
 	kinds := toStrings(req.Kinds)
 
-	vHits, err := s.searcher.SearchVector(ctx, port.VectorQuery{
+	// Per-leg timeout so a wedged vector path (vec0 corruption, sqlite-vec
+	// bug, lock contention) can't block FTS — and vice versa. The sub-ctx
+	// is cancelled as soon as the leg returns; fallbacks use the parent
+	// ctx, which is still alive. If the parent ctx already has a tighter
+	// deadline, context.WithTimeout honors it (sub-ctx picks the earlier).
+	vecCtx, cancelVec := context.WithTimeout(ctx, s.legTimeoutOrDefault())
+	vHits, err := s.searcher.SearchVector(vecCtx, port.VectorQuery{
 		Vector: queryVec[0], Model: s.embedder.Model().Slug,
 		Limit: overFetch, Scopes: scopes, Kinds: kinds,
 	})
+	cancelVec()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warn: hybrid search vector lookup failed, falling back to fts-only: %v\n", err)
 		return s.searchFTSOnly(ctx, req)
 	}
 
-	fHits, err := s.searcher.SearchFTS(ctx, port.SearchQuery{Query: req.Query, Limit: overFetch})
+	ftsCtx, cancelFTS := context.WithTimeout(ctx, s.legTimeoutOrDefault())
+	fHits, err := s.searcher.SearchFTS(ftsCtx, port.SearchQuery{Query: req.Query, Limit: overFetch})
+	cancelFTS()
 	if err != nil {
 		// Symmetric with the vector-failure path above: warn + proceed
 		// with what we have. Discarding vHits would waste the embed +

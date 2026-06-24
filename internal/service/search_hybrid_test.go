@@ -345,17 +345,27 @@ func TestSearchService_Hybrid_TiebreakPrefersNewer(t *testing.T) {
 // stubSearcher is a port.Searcher with controllable behavior. Used to
 // exercise error paths in searchHybrid without a real sqlite backend.
 type stubSearcher struct {
-	vecHits []port.VectorHit
-	vecErr  error
-	ftsHits []port.SearchHit
-	ftsErr  error
+	vecHits  []port.VectorHit
+	vecErr   error
+	ftsHits  []port.SearchHit
+	ftsErr   error
+	blockVec bool // if true, SearchVector blocks until ctx.Done (simulates vec0 hang)
+	blockFTS bool // if true, SearchFTS blocks until ctx.Done (simulates FTS5 hang)
 }
 
-func (s *stubSearcher) SearchFTS(_ context.Context, _ port.SearchQuery) ([]port.SearchHit, error) {
+func (s *stubSearcher) SearchFTS(ctx context.Context, _ port.SearchQuery) ([]port.SearchHit, error) {
+	if s.blockFTS {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return s.ftsHits, s.ftsErr
 }
 
-func (s *stubSearcher) SearchVector(_ context.Context, _ port.VectorQuery) ([]port.VectorHit, error) {
+func (s *stubSearcher) SearchVector(ctx context.Context, _ port.VectorQuery) ([]port.VectorHit, error) {
+	if s.blockVec {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return s.vecHits, s.vecErr
 }
 
@@ -409,4 +419,93 @@ func TestSearchService_Hybrid_FTSRankIsPostFilter(t *testing.T) {
 	assert.InDelta(t, wantScore, resp.Results[0].Score, 1e-9,
 		"u1 must score as post-filter rank 0 (1/60=%.6f); got %.6f (pre-filter rank 2 = 1/62=%.6f)",
 		wantScore, resp.Results[0].Score, 1.0/62.0)
+}
+
+// TestSearchService_Hybrid_PerLegTimeoutPreventsVecHang proves the per-leg
+// timeout bounds each retrieval path independently. Without it, a vec0
+// KNN query that hangs (corrupt vec0 table, sqlite-vec bug, lock
+// contention) blocks the entire hybrid search — FTS never runs even
+// though it could return results. With per-leg timeouts, the vector leg
+// is cancelled after svc.legTimeout, the existing vector-failure fallback
+// fires, and the user gets fts-only results within roughly the timeout.
+//
+// Setup: stubSearcher whose SearchVector blocks until ctx.Done. Parent
+// ctx has a 1s ceiling so the test terminates even without the fix
+// (asserting the fix is what brings elapsed under 300ms). ftsHits are
+// pre-seeded so the fallback path has something to return.
+func TestSearchService_Hybrid_PerLegTimeoutPreventsVecHang(t *testing.T) {
+	repo := newFakeRepo()
+	item := domain.ContextItem{
+		ID: "fts-hit-1", Scope: domain.ScopeUser, Kind: domain.KindNote, Tags: []string{},
+		Title: "fts only",
+	}
+	require.NoError(t, repo.Create(context.Background(), item))
+
+	searcher := &stubSearcher{
+		blockVec: true,
+		ftsHits:  []port.SearchHit{{ID: "fts-hit-1", Score: 1.0, Snippet: "match"}},
+	}
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	// Tight timeout for fast test feedback. Production leaves legTimeout
+	// zero, which defaults to 5s inside legTimeoutOrDefault.
+	svc.legTimeout = 50 * time.Millisecond
+
+	// Parent ctx ceiling: without the fix, SearchVector blocks on this
+	// 1s ctx; with the fix, it blocks on the 50ms sub-ctx.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	resp, err := svc.Search(ctx, SearchRequest{
+		Query: "x", Mode: SearchModeHybrid, Limit: 5,
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "vector-leg timeout must degrade to fts-only, not error")
+	assert.Less(t, elapsed, 300*time.Millisecond,
+		"per-leg timeout must bound the vec hang; elapsed=%v", elapsed)
+	require.NotEmpty(t, resp.Results, "degraded hybrid must still return FTS hits")
+	for _, r := range resp.Results {
+		assert.Equal(t, []string{"fts"}, r.MatchedBy,
+			"results from a vec-timeout-degraded search must be flagged fts-only")
+	}
+}
+
+// TestSearchService_Hybrid_PerLegTimeoutPreventsFTSHang is the mirror of
+// the vec-hang test: when FTS hangs, the vector results must still come
+// back. Without per-leg timeouts, a hung FTS5 query (disk I/O stall,
+// tokenizer spin on adversarial input) discards already-fetched vector
+// hits and blocks the whole search.
+func TestSearchService_Hybrid_PerLegTimeoutPreventsFTSHang(t *testing.T) {
+	repo := newFakeRepo()
+	item := domain.ContextItem{
+		ID: "vec-hit-1", Scope: domain.ScopeUser, Kind: domain.KindNote, Tags: []string{},
+		Title: "vec only",
+	}
+	require.NoError(t, repo.Create(context.Background(), item))
+
+	searcher := &stubSearcher{
+		vecHits:  []port.VectorHit{{ID: "vec-hit-1", Distance: 0.1, Score: 0.95}},
+		blockFTS: true,
+	}
+	emb := fake.New("fake-model", 8)
+	svc := NewSearchServiceWithEmbedder(searcher, repo, emb)
+	svc.legTimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	resp, err := svc.Search(ctx, SearchRequest{
+		Query: "x", Mode: SearchModeHybrid, Limit: 5,
+	})
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "fts-leg timeout must not error; vector results survive")
+	assert.Less(t, elapsed, 300*time.Millisecond,
+		"per-leg timeout must bound the fts hang; elapsed=%v", elapsed)
+	require.Len(t, resp.Results, 1, "vector hit must survive fts-leg timeout")
+	assert.Equal(t, "vec-hit-1", resp.Results[0].Item.ID)
+	assert.Equal(t, []string{"vector"}, resp.Results[0].MatchedBy)
 }
