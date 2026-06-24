@@ -43,7 +43,7 @@ func captureStderr(t *testing.T, fn func()) string {
 func TestEmbedModelAddCmd_RunECallsRegistryRegister(t *testing.T) {
 	reg := &stubRegistry{}
 	a := newStubApp(t)
-	a.Registry = reg
+	a.Models = service.NewModelService(reg, nil)
 	restore := swapLoadAppFn(a)
 	defer restore()
 
@@ -84,7 +84,7 @@ func TestEmbedModelAddCmd_RunECallsRegistryRegister(t *testing.T) {
 func TestEmbedModelListCmd_RunECallsRegistryList(t *testing.T) {
 	reg := &stubRegistry{}
 	a := newStubApp(t)
-	a.Registry = reg
+	a.Models = service.NewModelService(reg, nil)
 	restore := swapLoadAppFn(a)
 	defer restore()
 
@@ -110,7 +110,7 @@ func TestEmbedModelListCmd_RunECallsRegistryList(t *testing.T) {
 func TestEmbedModelRemoveCmd_RunECallsRegistryRemove(t *testing.T) {
 	reg := &stubRegistry{}
 	a := newStubApp(t)
-	a.Registry = reg
+	a.Models = service.NewModelService(reg, nil)
 	restore := swapLoadAppFn(a)
 	defer restore()
 
@@ -131,7 +131,7 @@ func TestEmbedModelRemoveCmd_RunECallsRegistryRemove(t *testing.T) {
 func TestEmbedSwitchCmd_RunECallsRegistrySetDefault(t *testing.T) {
 	reg := &stubRegistry{}
 	a := newStubApp(t)
-	a.Registry = reg
+	a.Models = service.NewModelService(reg, nil)
 	restore := swapLoadAppFn(a)
 	defer restore()
 

@@ -136,12 +136,12 @@ var embedModelAddCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if a.Registry == nil {
+		if a.Models == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
 		slug := args[0]
-		return a.Registry.Register(cmd.Context(), port.ModelSpec{
+		return a.Models.AddModel(cmd.Context(), port.ModelSpec{
 			Slug:      slug,
 			Provider:  modelAddProvider,
 			BaseURL:   modelAddBaseURL,
@@ -161,11 +161,11 @@ var embedModelListCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if a.Registry == nil {
+		if a.Models == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
-		models, err := a.Registry.List(cmd.Context())
+		models, err := a.Models.ListModels(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -193,11 +193,11 @@ var embedModelRemoveCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if a.Registry == nil {
+		if a.Models == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
-		return a.Registry.Remove(cmd.Context(), args[0])
+		return a.Models.RemoveModel(cmd.Context(), args[0])
 	},
 }
 
@@ -215,12 +215,12 @@ var embedSwitchCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if a.Registry == nil {
+		if a.Models == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
 		slug := args[0]
-		if err := a.Registry.SetDefault(cmd.Context(), slug); err != nil {
+		if err := a.Models.SwitchModel(cmd.Context(), slug); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr,
@@ -283,11 +283,11 @@ var embedStatusCmd = &cobra.Command{
 			return err
 		}
 		defer a.Close()
-		if a.EmbeddingRepo == nil {
+		if a.Models == nil {
 			return fmt.Errorf("embedder not enabled; set embedder.enabled=true in config")
 		}
 
-		rows, err := a.EmbeddingRepo.ListForItem(cmd.Context(), args[0])
+		rows, err := a.Models.ItemEmbeddingStatus(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}

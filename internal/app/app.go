@@ -68,6 +68,11 @@ type App struct {
 	// for `embed model add/list/remove` and `embed switch`. Plan 2c.
 	Registry port.ModelRegistry
 
+	// Models is the application-layer boundary for `embed model ...`,
+	// `embed switch`, and `embed status`. Constructed only when the
+	// embedder is enabled (registry + embeddingRepo exist).
+	Models *service.ModelService
+
 	Ingest *service.IngestService
 	Search *service.SearchService
 }
@@ -114,6 +119,10 @@ func Wire(cfg *config.Config) (*App, error) {
 	// reembed is nil unless embedder is enabled. Plan 2c: bulk re-embeds
 	// items lacking a done row for the active model (post `embed switch`).
 	var reembed *service.ReembedService
+	// models is nil unless embedder is enabled. Application boundary for
+	// `embed model add/list/remove`, `embed switch`, and `embed status`.
+	// Constructed only when registry + embeddingRepo exist.
+	var models *service.ModelService
 	// registry is nil unless embedder is enabled. Plan 2c Task 4: exposes
 	// the ModelRegistry so the CLI's `embed model add/list/remove` can
 	// reach it without re-deriving a handle from the DB.
@@ -166,6 +175,11 @@ func Wire(cfg *config.Config) (*App, error) {
 		reembed = service.NewReembedService(repo, embedSvc, port.ModelInfo{
 			Slug: active.Slug, Dimension: active.Dimension,
 		}, os.Stderr)
+		// ModelService is the application boundary for `embed model
+		// add/list/remove`, `embed switch`, and `embed status`. Thin
+		// pass-through over registry + embeddingRepo so the CLI doesn't
+		// depend on those ports directly.
+		models = service.NewModelService(registry, embeddingRepo)
 	}
 
 	ingest := service.NewIngestService(repo, fs, os.Stderr)
@@ -205,6 +219,7 @@ func Wire(cfg *config.Config) (*App, error) {
 		Items:         items,
 		Diagnostics:   diagnostics,
 		Registry:      registry,
+		Models:        models,
 		Ingest:        ingest,
 		Search:        search,
 	}, nil

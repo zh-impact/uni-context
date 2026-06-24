@@ -16,6 +16,7 @@ import (
 	"uni-context/internal/app"
 	"uni-context/internal/config"
 	"uni-context/internal/port"
+	"uni-context/internal/service"
 )
 
 // stubRegistry captures Register/List/Remove/SetDefault calls for the
@@ -158,7 +159,7 @@ func TestEmbedStatusCmd_DisabledEmbedderErrorsCleanly(t *testing.T) {
 func TestEmbedStatusCmd_NoRowsPrintsMessage(t *testing.T) {
 	repo := &stubEmbeddingRepo{rows: []port.EmbeddingStatus{}}
 	a := newStubApp(t)
-	a.EmbeddingRepo = repo
+	a.Models = service.NewModelService(nil, repo)
 	restore := swapLoadAppFn(a)
 	defer restore()
 
@@ -180,7 +181,7 @@ func TestEmbedStatusCmd_PrintsTabularOutput(t *testing.T) {
 		{ItemID: "i1", ModelSlug: "zzz-model", Status: "failed", Attempts: 3, LastError: longErr},
 	}}
 	a := newStubApp(t)
-	a.EmbeddingRepo = repo
+	a.Models = service.NewModelService(nil, repo)
 	restore := swapLoadAppFn(a)
 	defer restore()
 
