@@ -42,7 +42,7 @@ original PDF blob.
 │  CLI                │  user_note.go
 │  --file paper.pdf   │  --engine shell (optional override)
 └──────────┬──────────┘
-           │  service.WithPDFExtractor(ext)  (CreateOption)
+           │  service.WithExtractor(ext)  (CreateOption)
            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  IngestService.Create(ctx, input, opts...) (string, error)  │
@@ -67,7 +67,7 @@ original PDF blob.
 The CLI is the single entry point today; engine selection is driven by
 CLI flag (`A1` — per-call extractor override). The CLI builds the
 extractor instance from config + `--engine`, passes it via
-`service.WithPDFExtractor(ext)` to a single `Create` call. The service
+`service.WithExtractor(ext)` to a single `Create` call. The service
 itself has no engine-name knowledge.
 
 **Return type note:** `Create` returns `(string, error)` — only the
@@ -91,7 +91,7 @@ variable visible to the rollback block. Test
 | `adapter` | `internal/adapter/pdf/shell.go` (new) | `exec.Command` wrapper |
 | `adapter` | `internal/adapter/pdf/http.go` (new) | HTTP POST binary extractor |
 | `app` | `internal/app/pdf.go` (new) | `BuildPDFExtractor` / `BuildExtractorForEngine` factories used by Wire |
-| `service` | `internal/service/ingest.go` (modify) | PDF branch + `WithPDFExtractor` `CreateOption` |
+| `service` | `internal/service/ingest.go` (modify) | PDF branch + `WithExtractor` `CreateOption` (per-call) + `WithPDFExtractor` `IngestOption` (constructor) |
 | `cli` | `internal/cli/user_note.go` (modify) | Accept `.pdf`, parse `--engine`, route to service |
 | `config` | `internal/config/config.go` (modify) | `PDFConfig` block — added to existing `Config` struct alongside `EmbedderConfig` |
 
@@ -230,11 +230,17 @@ func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, emb 
 // CreateOption configures one Create call. Overrides constructor default.
 type CreateOption func(*createConfig)
 
-// WithPDFExtractor overrides the service's constructor-configured
+// WithExtractor overrides the service's constructor-configured
 // extractor for this single call. Used when the CLI passes --engine.
-// Same name as the IngestOption variant — they live in different types
-// so call-site context determines which applies.
-func WithPDFExtractor(ext port.PDFExtractor) CreateOption {
+//
+// NOTE on the name divergence from WithPDFExtractor (the IngestOption
+// variant): Go does not support function overloading — two top-level
+// functions in the same package cannot share a name, even with
+// different signatures. "Per-type scoping" only applies to methods on
+// different receiver types, not package-level functions. The two
+// options intentionally have different names: WithPDFExtractor for
+// the constructor, WithExtractor for the per-call override.
+func WithExtractor(ext port.PDFExtractor) CreateOption {
     return func(c *createConfig) { c.extractor = ext }
 }
 
@@ -242,10 +248,9 @@ func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOpti
 ```
 
 Two distinct option types because they have different lifetimes:
-`IngestOption` is service-wide; `CreateOption` is per-call. Both
-expose a function named `WithPDFExtractor` — Go's per-type scoping
-keeps them distinct at the call site (one takes/returns
-`IngestOption`, the other `CreateOption`).
+`IngestOption` is service-wide; `CreateOption` is per-call. The
+naming asymmetry is a deliberate workaround for Go's lack of
+overloading, not an inconsistency to fix.
 
 ### Branching logic
 
@@ -306,13 +311,18 @@ func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOpti
     // is "" and item.ContentURI is "" (no text externalization). Calling
     // Embed(title, "") would produce a title-only vector — misleading
     // for semantic search (the item has no body signal). Skip embed
-    // with a warning when both are empty; the async worker picks the
-    // item up later if a re-extract ever produces text.
-    if s.embed != nil && (item.Content != "" || item.ContentURI != "") {
+    // with a warning in that specific case.
+    //
+    // IMPORTANT: scope the skip to the PDF path via pdfURI != "" so we
+    // don't change behavior for non-PDF flows. A user may legitimately
+    // `unictx user note add ""` (empty content) and the existing
+    // contract calls embed unconditionally — preserve that.
+    skipEmbed := pdfURI != "" && item.Content == "" && item.ContentURI == ""
+    if s.embed != nil && !skipEmbed {
         if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
             fmt.Fprintf(s.log, "warn: embed failed for %s: %v\n", item.ID, err)
         }
-    } else if s.embed != nil {
+    } else if s.embed != nil && skipEmbed {
         fmt.Fprintf(s.log, "warn: skipping embed for %s (empty extracted content)\n", item.ID)
     }
 
@@ -374,7 +384,7 @@ rejected before ingest.
    pointing at config.
 3. Otherwise build the extractor via
    `app.BuildExtractorForEngine(name, cfg.PDF)`.
-4. Pass to `a.Ingest.Create(ctx, in, service.WithPDFExtractor(ext))`.
+4. Pass to `a.Ingest.Create(ctx, in, service.WithExtractor(ext))`.
 
 ## Config schema
 
@@ -464,15 +474,19 @@ key to set.
 
 ### Wiring in `app.Wire` (`internal/app/app.go`)
 
-Add alongside the existing `embedder` wiring block. Pattern matches
-the conditional embedder setup (only attach the option when configured):
+Add alongside the existing `embedder` wiring block. The existing Wire
+has two branches (with and without embedder — Plan 1 compat); both
+must receive the variadic opts so PDF support works regardless of
+embedder configuration:
 
 ```go
-// existing:
-//   embedder := buildEmbedder(cfg.Embedder)
-//   ingestSvc := service.NewIngestServiceWithEmbedder(repo, fs, embedder, os.Stderr)
+// existing two-branch structure:
+//   ingest := service.NewIngestService(repo, fs, os.Stderr)
+//   if embedSvc != nil {
+//       ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc, os.Stderr)
+//   }
 
-// new:
+// new: build opts once, pass to both branches
 pdfExt, err := BuildPDFExtractor(cfg.PDF, os.Stderr)
 if err != nil {
     return nil, fmt.Errorf("build pdf extractor: %w", err)
@@ -481,14 +495,18 @@ opts := []service.IngestOption{}
 if pdfExt != nil {
     opts = append(opts, service.WithPDFExtractor(pdfExt))
 }
-ingestSvc := service.NewIngestServiceWithEmbedder(repo, fs, embedder, os.Stderr, opts...)
+ingest := service.NewIngestService(repo, fs, os.Stderr, opts...)
+if embedSvc != nil {
+    ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc, os.Stderr, opts...)
+}
 ```
 
 The CLI's `--engine` override path goes through the same
 `BuildExtractorForEngine` factory at call time and passes the result
-via `service.WithPDFExtractor(ext)` (a `CreateOption`) — different type
-from the constructor option of the same name, resolved by Go's
-per-type scoping.
+via `service.WithExtractor(ext)` (a `CreateOption`). The constructor
+variant is `WithPDFExtractor` (an `IngestOption`); the per-call
+variant is `WithExtractor` (a `CreateOption`). Different names are
+required because Go does not support function overloading.
 
 ## Error matrix
 
@@ -520,7 +538,7 @@ per-type scoping.
   test per fixture for the three contracts (valid, image-only,
   encrypted).
 - **shell**: temp shell scripts written by the test
-  (`os.WriteTempFile` + `chmod +x`) implementing `echo "fake text"`,
+  (`os.CreateTemp` + `chmod +x`) implementing `echo "fake text"`,
   `exit 1`, `sleep 5`. No reliance on production binaries.
 - **http**: `httptest.Server` returning canned text/plain, 500, wrong
   MIME (text/html), and a slow handler to trigger timeout.
@@ -535,7 +553,7 @@ Using a fake `PDFExtractor`:
 | `Create_PDF_EmptyExtraction_StoresBlobEmptyContent` | Returns ID; item.Content = ""; SourceMeta still has `original_uri`; `s.log` contains `"warning: pdf extraction yielded no text"` AND `"skipping embed"` |
 | `Create_PDF_ErrorsWithoutExtractor` | MIME=pdf + no extractor → error matches `"pdf extraction not configured"`; returns `("", err)` |
 | `Create_PDF_PropagatesExtractorError` | Extractor errors → wrapped as `"extract pdf: <orig>"`; returns `("", err)` |
-| `Create_PDF_WithExtractorOverride` | Constructor has no extractor configured (pdfExtractor=nil), per-call override via `WithPDFExtractor(ext)` supplies one; assert override wins (extractor is called, extractor's returned text is what lands in item) |
+| `Create_PDF_WithExtractorOverride` | Constructor has no extractor configured (pdfExtractor=nil), per-call override via `WithExtractor(ext)` supplies one; assert override wins (extractor is called, extractor's returned text is what lands in item) |
 | `Create_PDF_LargeExtractedText_ExternalizesTextOnly` | Extracted text > 4KB → externalized to a *text* FileStore entry; ContentURI points to text blob; `SourceMeta["original_uri"]` still points to PDF blob (two distinct URIs — asymmetric on purpose) |
 | `Create_PDF_RollsBackBothBlobsOnRepoFailure` | Stub repo to fail on Create; with extracted text > 4KB (so text was externalized) AND a PDF blob stored, assert `fs.Delete` called twice (once for text URI, once for pdfURI); returns `("", err)` |
 
@@ -559,15 +577,22 @@ The last two tests pin down load-bearing invariants:
 
 - `Add_PDF_NoEngineNoConfig_Errors` — friendly message
 - `Add_PDF_UnknownEngineValue_Errors`
-- `Add_PDF_PassesExtractorOverride` — stub `a.Ingest` with a recorder;
-  assert `WithPDFExtractor` (CreateOption) was passed with the right
-  engine's concrete type
+- `Add_PDF_PassesExtractorOverride` — configure `pdf.engine=shell`
+  with a stub shell command (script that prints canned text via
+  stdout); run `user note add --file sample.pdf`; retrieve the
+  created item via `Items.Get`; assert `item.Content` equals the
+  canned text the stub script printed. This verifies the override
+  plumbing end-to-end (flag → factory → service → repo) without
+  needing to inspect private `createConfig` state. (Testing the
+  gxpdf path here would also work but couples CLI tests to the
+  gxpdf dep; the shell path uses a stub script the test owns.)
 - `Add_PDF_SizeCapIsFiftyMB` — fixture file at 50 MB boundary passes;
   50 MB + 1 byte fails. Replaces any prior 10 MB boundary test.
 
-A full end-to-end (real PDF → real extract → real DB) is skipped:
-components are individually covered, and an e2e would couple CLI
-tests to the gxpdf dependency without adding signal.
+A full end-to-end (real PDF → gxpdf → real DB) is skipped: components
+are individually covered, and an e2e would couple CLI tests to the
+gxpdf dependency without adding signal beyond what
+`Add_PDF_PassesExtractorOverride` already provides.
 
 ## Fixtures (`internal/adapter/pdf/testdata/`)
 
