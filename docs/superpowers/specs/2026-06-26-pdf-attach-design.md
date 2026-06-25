@@ -42,30 +42,45 @@ original PDF blob.
 │  CLI                │  user_note.go
 │  --file paper.pdf   │  --engine shell (optional override)
 └──────────┬──────────┘
-           │  service.WithExtractor(ext)
+           │  service.WithPDFExtractor(ext)  (CreateOption)
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  IngestService.Create(ctx, input, opts...)                  │
+│  IngestService.Create(ctx, input, opts...) (string, error)  │
 │  ───────────────────────────────────────                    │
 │  if Input.MIME == "application/pdf":                       │
 │    if extractor == nil → error "pdf extraction not          │
 │      configured: set pdf.engine in config or pass --engine" │
-│    1. text, err := extractor.Extract(ctx, rawBytes)         │
-│    2. pdfURI, _ := fs.Put(rawBytes, "application/pdf")      │
+│    1. text, err := extractor.Extract(ctx, []byte(in.Content)) │
+│    2. pdfURI, _ := fs.Put([]byte(in.Content),               │
+│                          "application/pdf")                 │
 │    3. in.SourceMeta["original_uri"]   = pdfURI              │
 │       in.SourceMeta["original_mime"]  = "application/pdf"   │
 │       in.Content = text   // "" on image-only               │
 │       in.MIME    = "text/plain"                             │
 │  ───────────────────────────────────────                    │
 │  (existing flow: externalize > 4KB → repo → FTS → embed)    │
+│  (rollback extended: on repo.Create failure, also fs.Delete │
+│   pdfURI from SourceMeta["original_uri"])                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 The CLI is the single entry point today; engine selection is driven by
 CLI flag (`A1` — per-call extractor override). The CLI builds the
 extractor instance from config + `--engine`, passes it via
-`service.WithExtractor(ext)` to a single `Create` call. The service
+`service.WithPDFExtractor(ext)` to a single `Create` call. The service
 itself has no engine-name knowledge.
+
+**Return type note:** `Create` returns `(string, error)` — only the
+item ID, not the full `domain.ContextItem`. This matches the existing
+signature (ingest.go:63). PDF branch must `return "", err` on failure.
+
+**Rollback extension (load-bearing):** the existing rollback at
+ingest.go:111-113 only deletes `item.ContentURI` (the externalized
+*text* blob). The PDF branch adds a *second* blob (`pdfURI` in
+SourceMeta["original_uri"]) that must also be cleaned up if
+`repo.Create` fails. Implementation must capture `pdfURI` in a
+variable visible to the rollback block. Test
+`Create_PDF_RollsBackBothBlobsOnRepoFailure` pins this.
 
 ## Components
 
@@ -76,9 +91,9 @@ itself has no engine-name knowledge.
 | `adapter` | `internal/adapter/pdf/shell.go` (new) | `exec.Command` wrapper |
 | `adapter` | `internal/adapter/pdf/http.go` (new) | HTTP POST binary extractor |
 | `app` | `internal/app/pdf.go` (new) | `BuildPDFExtractor` / `BuildExtractorForEngine` factories used by Wire |
-| `service` | `internal/service/ingest.go` (modify) | PDF branch + `WithExtractor` `CreateOption` |
+| `service` | `internal/service/ingest.go` (modify) | PDF branch + `WithPDFExtractor` `CreateOption` |
 | `cli` | `internal/cli/user_note.go` (modify) | Accept `.pdf`, parse `--engine`, route to service |
-| `config` | `internal/app/config.go` (modify) | `PDFConfig` block in app config |
+| `config` | `internal/config/config.go` (modify) | `PDFConfig` block — added to existing `Config` struct alongside `EmbedderConfig` |
 
 ## Domain model
 
@@ -140,7 +155,18 @@ func NewGxpdfExtractor(log io.Writer) *GxpdfExtractor
 
 - Encrypted PDF (no password provided) → returns error containing
   `"encrypted"` so callers can detect and message clearly.
-- Dependency: `github.com/coregx/gxpdf` (pure Go, MIT, Go 1.25+).
+- **Dependency verified 2026-06-26:**
+  [github.com/coregx/gxpdf](https://github.com/coregx/gxpdf) —
+  pure Go, MIT, requires Go 1.25+. API surface:
+  `gxpdf.NewReader(r io.ReaderAt, size int64) (*Document, error)`,
+  `doc.Pages() []Page`, `page.ExtractText() (string, error)`,
+  plus `OpenWithPassword(path, password string)` for encrypted PDFs
+  (deferred — out of scope per Non-goals). Project `go.mod` already
+  runs Go 1.25, so the version constraint is satisfied.
+  - *Risk note:* not as widely adopted as `pdfcpu` or
+    `ledongthuc/pdf`, but the API is clean, MIT-licensed, and the
+    shell/http engines provide a fallback if extraction quality
+    proves inadequate.
 
 ### `ShellExtractor` (`internal/adapter/pdf/shell.go`)
 
@@ -204,37 +230,50 @@ func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, emb 
 // CreateOption configures one Create call. Overrides constructor default.
 type CreateOption func(*createConfig)
 
-// WithExtractor overrides the service's constructor-configured
+// WithPDFExtractor overrides the service's constructor-configured
 // extractor for this single call. Used when the CLI passes --engine.
-func WithExtractor(ext port.PDFExtractor) CreateOption {
+// Same name as the IngestOption variant — they live in different types
+// so call-site context determines which applies.
+func WithPDFExtractor(ext port.PDFExtractor) CreateOption {
     return func(c *createConfig) { c.extractor = ext }
 }
 
-func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOption) (domain.ContextItem, error)
+func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOption) (string, error)
 ```
 
 Two distinct option types because they have different lifetimes:
-`IngestOption` is service-wide; `CreateOption` is per-call.
+`IngestOption` is service-wide; `CreateOption` is per-call. Both
+expose a function named `WithPDFExtractor` — Go's per-type scoping
+keeps them distinct at the call site (one takes/returns
+`IngestOption`, the other `CreateOption`).
 
 ### Branching logic
 
 ```go
-func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOption) (domain.ContextItem, error) {
+func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOption) (string, error) {
     cfg := createConfig{extractor: s.pdfExtractor}
     for _, opt := range opts { opt(&cfg) }
 
+    // pdfURI is captured here so the repo.Create rollback below can
+    // clean up the PDF blob too. Empty when no PDF branch ran.
+    var pdfURI string
+
     if in.MIME == "application/pdf" {
         if cfg.extractor == nil {
-            return domain.ContextItem{}, fmt.Errorf(
+            return "", fmt.Errorf(
                 "pdf extraction not configured: set pdf.engine in config or pass --engine")
         }
-        text, err := cfg.extractor.Extract(ctx, in.Content)
+        // PDF bytes arrive as string via Input.Content (CLI reads file as
+        // []byte then casts to string). Cast back for the extractor and
+        // FileStore — both take []byte. Pattern matches existing
+        // externalization at ingest.go:90 (fs.Put([]byte(in.Content), mime)).
+        text, err := cfg.extractor.Extract(ctx, []byte(in.Content))
         if err != nil {
-            return domain.ContextItem{}, fmt.Errorf("extract pdf: %w", err)
+            return "", fmt.Errorf("extract pdf: %w", err)
         }
-        pdfURI, _, err := s.fs.Put(in.Content, "application/pdf")
+        pdfURI, _, err = s.fs.Put([]byte(in.Content), "application/pdf")
         if err != nil {
-            return domain.ContextItem{}, fmt.Errorf("store pdf blob: %w", err)
+            return "", fmt.Errorf("store pdf blob: %w", err)
         }
         if text == "" {
             fmt.Fprintf(s.log,
@@ -247,22 +286,60 @@ func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOpti
         in.MIME    = "text/plain"
     }
 
-    // ... existing flow unchanged: externalize > 4KB → repo.Create → ReindexFTS → embed
+    // ... existing flow: build item, externalize text > 4KB, repo.Create ...
+
+    // Extended rollback: on repo.Create failure, delete any blob we
+    // created. The existing branch handles item.ContentURI (externalized
+    // text); the new branch handles pdfURI (PDF blob). Both must be
+    // cleaned or we leak orphaned refcount=1 blobs.
+    if err := s.repo.Create(ctx, item); err != nil {
+        if item.ContentURI != "" {
+            _ = s.fs.Delete(item.ContentURI)
+        }
+        if pdfURI != "" {
+            _ = s.fs.Delete(pdfURI)
+        }
+        return "", fmt.Errorf("persist item: %w", err)
+    }
+
+    // Embedding: when PDF extraction yielded empty text, item.Content
+    // is "" and item.ContentURI is "" (no text externalization). Calling
+    // Embed(title, "") would produce a title-only vector — misleading
+    // for semantic search (the item has no body signal). Skip embed
+    // with a warning when both are empty; the async worker picks the
+    // item up later if a re-extract ever produces text.
+    if s.embed != nil && (item.Content != "" || item.ContentURI != "") {
+        if err := s.embed.Embed(ctx, item.ID, item.Title, item.Content); err != nil {
+            fmt.Fprintf(s.log, "warn: embed failed for %s: %v\n", item.ID, err)
+        }
+    } else if s.embed != nil {
+        fmt.Fprintf(s.log, "warn: skipping embed for %s (empty extracted content)\n", item.ID)
+    }
+
+    // ... ReindexFTS, return item.ID ...
 }
 ```
+
+The rollback and embed-skip additions are the two places where the PDF
+branch has to extend existing control flow rather than just transform
+Input upfront.
 
 ## CLI surface
 
 ### File-size cap
 
-`validateFileImport` bumps from 10MB → **50MB** flat (no MIME
-differentiation). Text files rarely approach this; PDFs get realistic
-headroom.
+`maxFileBytes` (user_note.go:308) bumps from `10 * 1024 * 1024` →
+`50 * 1024 * 1024`. Text files rarely approach this; PDFs get
+realistic headroom. **Test impact:** `checkFileSize` has pure-function
+boundary tests in `user_note_test.go` (or equivalent); the at-cap and
+cap+1 cases must move to the new value. The implementation plan must
+list those tests and update their expected values.
 
 ### MIME detection — rename + extend
 
-`mimeForTextFile` becomes `mimeForFile` (the old name lies once it
-handles PDFs). Update all callers in `user_note.go`.
+`mimeForTextFile` (user_note.go:314) becomes `mimeForFile` (the old
+name lies once it handles PDFs). Update the call site at user_note.go:81
+and any test that references the old name.
 
 ```go
 // mimeForFile returns the MIME type for a path based on extension.
@@ -292,16 +369,31 @@ rejected before ingest.
 
 ### Runtime resolution order
 
-1. Read `--engine` flag. If empty, fall back to `a.Config.PDF.Engine`.
+1. Read `--engine` flag. If empty, fall back to `cfg.PDF.Engine` (where `cfg` is the `*config.Config` returned by `Load`).
 2. If still empty AND MIME is `application/pdf` → friendly error
    pointing at config.
 3. Otherwise build the extractor via
-   `app.BuildExtractorForEngine(name, a.Config.PDF)`.
-4. Pass to `a.Ingest.Create(ctx, in, service.WithExtractor(ext))`.
+   `app.BuildExtractorForEngine(name, cfg.PDF)`.
+4. Pass to `a.Ingest.Create(ctx, in, service.WithPDFExtractor(ext))`.
 
 ## Config schema
 
+`PDFConfig` and `EngineConfig` are added to `internal/config/config.go`
+alongside the existing `EmbedderConfig`. They live in package `config`
+because that's where all other YAML types live — putting them in `app`
+would create a cycle (`app` → `config` for the rest of the types,
+`config` → `app` for these). Add a `PDF PDFConfig` field to the
+top-level `Config` struct.
+
 ```go
+// in internal/config/config.go
+type Config struct {
+    User     UserConfig     `yaml:"user"`
+    DataDir  string         `yaml:"data_dir"`
+    Embedder EmbedderConfig `yaml:"embedder"`
+    PDF      PDFConfig      `yaml:"pdf"`     // NEW
+}
+
 type PDFConfig struct {
     Engine  string                  `yaml:"engine"`  // gxpdf | shell | http; empty = disabled
     Engines map[string]EngineConfig `yaml:"engines"`
@@ -316,6 +408,11 @@ type EngineConfig struct {
 ```
 
 Defaults applied in `BuildExtractorForEngine`: zero `Timeout` → 30s.
+Unlike `EmbedderConfig`, `PDFConfig` does NOT need a defaults pass in
+`config.Load` because the only meaningful default (30s timeout) is
+applied at the factory layer where the type is concrete. An empty
+`Engine` field means "PDF support disabled," mirroring how
+`EmbedderConfig.Enabled=false` works.
 
 ### Example config.yaml
 
@@ -338,14 +435,14 @@ pdf:
 // Returns (nil, nil) when PDF is unconfigured — caller proceeds
 // without PDF support, and the service errors clearly if a PDF
 // is passed.
-func BuildPDFExtractor(cfg PDFConfig) (port.PDFExtractor, error)
+func BuildPDFExtractor(cfg config.PDFConfig, log io.Writer) (port.PDFExtractor, error)
 
 // BuildExtractorForEngine returns an extractor for an explicit engine
 // name. Used by CLI when --engine overrides the config default.
-func BuildExtractorForEngine(name string, cfg PDFConfig) (port.PDFExtractor, error)
+func BuildExtractorForEngine(name string, cfg config.PDFConfig, log io.Writer) (port.PDFExtractor, error)
 ```
 
-Both funnel into a private `buildExtractor(name, engines)` switch
+Both funnel into a private `buildExtractor(name, engines, log)` switch
 that constructs the adapter directly:
 
 ```go
@@ -364,6 +461,34 @@ to other services (currently `os.Stderr` at the Wire call site).
 Missing config for the chosen engine (e.g., `shell` selected but
 `pdf.engines.shell.command` empty) → error naming the specific config
 key to set.
+
+### Wiring in `app.Wire` (`internal/app/app.go`)
+
+Add alongside the existing `embedder` wiring block. Pattern matches
+the conditional embedder setup (only attach the option when configured):
+
+```go
+// existing:
+//   embedder := buildEmbedder(cfg.Embedder)
+//   ingestSvc := service.NewIngestServiceWithEmbedder(repo, fs, embedder, os.Stderr)
+
+// new:
+pdfExt, err := BuildPDFExtractor(cfg.PDF, os.Stderr)
+if err != nil {
+    return nil, fmt.Errorf("build pdf extractor: %w", err)
+}
+opts := []service.IngestOption{}
+if pdfExt != nil {
+    opts = append(opts, service.WithPDFExtractor(pdfExt))
+}
+ingestSvc := service.NewIngestServiceWithEmbedder(repo, fs, embedder, os.Stderr, opts...)
+```
+
+The CLI's `--engine` override path goes through the same
+`BuildExtractorForEngine` factory at call time and passes the result
+via `service.WithPDFExtractor(ext)` (a `CreateOption`) — different type
+from the constructor option of the same name, resolved by Go's
+per-type scoping.
 
 ## Error matrix
 
@@ -406,17 +531,21 @@ Using a fake `PDFExtractor`:
 
 | Test | Asserts |
 |---|---|
-| `Create_PDF_ExtractsAndStoresBlob` | Content = extracted text; `SourceMeta["original_uri"]` set; `fs.Put` called once with `application/pdf` MIME |
-| `Create_PDF_EmptyExtraction_StoresBlobEmptyContent` | Content = ""; SourceMeta still has `original_uri`; `s.log` buffer contains `"warning"` |
-| `Create_PDF_ErrorsWithoutExtractor` | MIME=pdf + no extractor → error matches `"pdf extraction not configured"` |
-| `Create_PDF_PropagatesExtractorError` | Extractor errors → wrapped as `"extract pdf: <orig>"` |
-| `Create_PDF_WithExtractorOverride` | Constructor default fails, override via `WithExtractor` wins |
+| `Create_PDF_ExtractsAndStoresBlob` | Returns item ID non-empty; `fs.Put` called once with `application/pdf` MIME; `SourceMeta["original_uri"]` set |
+| `Create_PDF_EmptyExtraction_StoresBlobEmptyContent` | Returns ID; item.Content = ""; SourceMeta still has `original_uri`; `s.log` contains `"warning: pdf extraction yielded no text"` AND `"skipping embed"` |
+| `Create_PDF_ErrorsWithoutExtractor` | MIME=pdf + no extractor → error matches `"pdf extraction not configured"`; returns `("", err)` |
+| `Create_PDF_PropagatesExtractorError` | Extractor errors → wrapped as `"extract pdf: <orig>"`; returns `("", err)` |
+| `Create_PDF_WithExtractorOverride` | Constructor has no extractor configured (pdfExtractor=nil), per-call override via `WithPDFExtractor(ext)` supplies one; assert override wins (extractor is called, extractor's returned text is what lands in item) |
 | `Create_PDF_LargeExtractedText_ExternalizesTextOnly` | Extracted text > 4KB → externalized to a *text* FileStore entry; ContentURI points to text blob; `SourceMeta["original_uri"]` still points to PDF blob (two distinct URIs — asymmetric on purpose) |
+| `Create_PDF_RollsBackBothBlobsOnRepoFailure` | Stub repo to fail on Create; with extracted text > 4KB (so text was externalized) AND a PDF blob stored, assert `fs.Delete` called twice (once for text URI, once for pdfURI); returns `("", err)` |
 
-The last test pins down that large extracted text does NOT overwrite
-`original_uri` with the text blob's URI. The existing externalization
-path stays unchanged; the PDF branch just transforms Input before that
-path runs.
+The last two tests pin down load-bearing invariants:
+- `LargeExtractedText_ExternalizesTextOnly`: large extracted text does
+  NOT overwrite `original_uri` with the text blob's URI.
+- `RollsBackBothBlobsOnRepoFailure`: the rollback extension actually
+  fires for the PDF blob, not just the text blob. Without this test,
+  a future refactor could silently drop the `pdfURI != ""` branch and
+  leak orphans on every repo.Create failure.
 
 ### 3. App factory tests (`internal/app/pdf_test.go`)
 
@@ -431,8 +560,10 @@ path runs.
 - `Add_PDF_NoEngineNoConfig_Errors` — friendly message
 - `Add_PDF_UnknownEngineValue_Errors`
 - `Add_PDF_PassesExtractorOverride` — stub `a.Ingest` with a recorder;
-  assert `WithExtractor` was passed with the right engine's concrete
-  type
+  assert `WithPDFExtractor` (CreateOption) was passed with the right
+  engine's concrete type
+- `Add_PDF_SizeCapIsFiftyMB` — fixture file at 50 MB boundary passes;
+  50 MB + 1 byte fails. Replaces any prior 10 MB boundary test.
 
 A full end-to-end (real PDF → real extract → real DB) is skipped:
 components are individually covered, and an e2e would couple CLI
