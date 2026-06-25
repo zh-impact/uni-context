@@ -221,7 +221,7 @@ func WithPDFExtractor(ext port.PDFExtractor) IngestOption {
 }
 
 func NewIngestService(repo port.ContextRepo, fs port.FileStore, log io.Writer, opts ...IngestOption) *IngestService
-func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, emb port.Embedder, log io.Writer, opts ...IngestOption) *IngestService
+func NewIngestServiceWithEmbedder(repo port.ContextRepo, fs port.FileStore, embed *EmbedService, log io.Writer, opts ...IngestOption) *IngestService
 ```
 
 ### Per-call override (A1) — separate option type
