@@ -268,6 +268,15 @@ func (s *IngestService) Create(ctx context.Context, in Input, opts ...CreateOpti
             return "", fmt.Errorf(
                 "pdf extraction not configured: set pdf.engine in config or pass --engine")
         }
+        // SourceMeta nil-guard: the PDF branch writes to in.SourceMeta
+        // BEFORE the existing nil-check at ingest.go:79-81 runs (that
+        // check protects item.SourceMeta, built later). The CLI always
+        // initializes the map, but a future API caller passing nil
+        // would panic on in.SourceMeta["original_uri"] = pdfURI.
+        // Defensive: ensure the map exists.
+        if in.SourceMeta == nil {
+            in.SourceMeta = map[string]any{}
+        }
         // PDF bytes arrive as string via Input.Content (CLI reads file as
         // []byte then casts to string). Cast back for the extractor and
         // FileStore — both take []byte. Pattern matches existing
@@ -550,7 +559,7 @@ Using a fake `PDFExtractor`:
 | Test | Asserts |
 |---|---|
 | `Create_PDF_ExtractsAndStoresBlob` | Returns item ID non-empty; `fs.Put` called once with `application/pdf` MIME; `SourceMeta["original_uri"]` set |
-| `Create_PDF_EmptyExtraction_StoresBlobEmptyContent` | Returns ID; item.Content = ""; SourceMeta still has `original_uri`; `s.log` contains `"warning: pdf extraction yielded no text"` AND `"skipping embed"` |
+| `Create_PDF_EmptyExtraction_StoresBlobEmptyContent` | Returns ID; item.Content = ""; SourceMeta still has `original_uri`; `s.log` contains `"warning: pdf extraction yielded no text"` AND `"skipping embed"`. **Must construct via `NewIngestServiceWithEmbedder` with a fake embedder** — the "skipping embed" branch only fires when `s.embed != nil && skipEmbed`. Without an embedder, `s.embed` is nil and the second log line never appears; the test would silently fail its assertion. |
 | `Create_PDF_ErrorsWithoutExtractor` | MIME=pdf + no extractor → error matches `"pdf extraction not configured"`; returns `("", err)` |
 | `Create_PDF_PropagatesExtractorError` | Extractor errors → wrapped as `"extract pdf: <orig>"`; returns `("", err)` |
 | `Create_PDF_WithExtractorOverride` | Constructor has no extractor configured (pdfExtractor=nil), per-call override via `WithExtractor(ext)` supplies one; assert override wins (extractor is called, extractor's returned text is what lands in item) |
@@ -586,6 +595,14 @@ The last two tests pin down load-bearing invariants:
   needing to inspect private `createConfig` state. (Testing the
   gxpdf path here would also work but couples CLI tests to the
   gxpdf dep; the shell path uses a stub script the test owns.)
+  **Fixture wiring:** the test goes through `swapUserNoteLoadAppFn`
+  (or equivalent pattern in `user_note_run_e_test.go`); the returned
+  `*config.Config` must set `PDF.Engine = "shell"` AND
+  `PDF.Engines["shell"].Command` to the absolute path of the temp
+  script the test created via `os.CreateTemp` + `os.Chmod(0o755)`.
+  Without `Engines["shell"].Command` populated, `BuildExtractorForEngine`
+  errors with "engine 'shell' not configured" before reaching the
+  service.
 - `Add_PDF_SizeCapIsFiftyMB` — fixture file at 50 MB boundary passes;
   50 MB + 1 byte fails. Replaces any prior 10 MB boundary test.
 
