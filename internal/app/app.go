@@ -178,9 +178,23 @@ func Wire(cfg *config.Config) (*App, error) {
 		models = service.NewModelService(registry, embeddingRepo)
 	}
 
-	ingest := service.NewIngestService(repo, fs, os.Stderr)
+	// PDF extractor (Task: pdf-attach). Built unconditionally so a
+	// misconfigured engine (e.g. shell selected but no command) fails
+	// Wire loudly. BuildPDFExtractor returns (nil, nil) when PDF is
+	// unconfigured — the service then errors only if a PDF is actually
+	// passed, which is the right UX for users who don't use PDFs.
+	pdfExt, err := BuildPDFExtractor(cfg.PDF, os.Stderr)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("build pdf extractor: %w", err)
+	}
+	ingestOpts := []service.IngestOption{}
+	if pdfExt != nil {
+		ingestOpts = append(ingestOpts, service.WithPDFExtractor(pdfExt))
+	}
+	ingest := service.NewIngestService(repo, fs, os.Stderr, ingestOpts...)
 	if embedSvc != nil {
-		ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc, os.Stderr)
+		ingest = service.NewIngestServiceWithEmbedder(repo, fs, embedSvc, os.Stderr, ingestOpts...)
 	}
 
 	search := service.NewSearchService(searcher, repo, os.Stderr)
