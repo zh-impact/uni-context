@@ -207,13 +207,27 @@ factory applies the 30s timeout default when constructing adapters."
 **Interfaces:**
 - Produces: `port.PDFExtractor` interface, `pdf.NewGxpdfExtractor(log io.Writer) *GxpdfExtractor`. Used by Task 5 (factory), Task 6 (service tests via fake).
 
-- [ ] **Step 1: Add gxpdf dependency**
+- [ ] **Step 1: Add gxpdf dependency and verify API surface**
 
 ```
 HTTPS_PROXY=socks5://127.0.0.1:7890 go get github.com/coregx/gxpdf@latest
 ```
 
 Verify `go.mod` has the new require line.
+
+**Then verify the API surface the implementation assumes.** The spec confirmed three methods (`NewReader`, `doc.Pages()`, `page.ExtractText()`); the implementation also calls `defer doc.Close()`. Confirm `Close()` exists before writing Step 6's code:
+
+```
+HTTPS_PROXY=socks5://127.0.0.1:7890 go doc github.com/coregx/gxpdf | grep -i close
+```
+
+Or grep the module sources directly:
+
+```
+grep -rn 'func.*Close' "$(go env GOMODCACHE)/github.com/coregx/gxpdf@"*/
+```
+
+If `*gxpdf.Document` has no `Close()` method (or it's named differently — `Release`, `Free`, etc.), adjust Step 6's implementation accordingly. If no cleanup method exists, drop the `defer doc.Close()` line entirely — pure-Go PDF readers typically don't hold OS resources that need explicit release, so leak risk is minimal within a single function scope.
 
 - [ ] **Step 2: Create test fixtures**
 
@@ -255,7 +269,6 @@ package pdf
 
 import (
 	"bytes"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -320,8 +333,6 @@ func TestTestDataFixturesExist(t *testing.T) {
 		_, err := os.ReadFile(filepath.Join("testdata", name))
 		require.NoError(t, err, "fixture %s missing; see testdata/README.md", name)
 	}
-	// Suppress unused-import if fs becomes unused later.
-	_ = fs.ErrExist
 }
 ```
 
@@ -639,9 +650,14 @@ func (x *ShellExtractor) Extract(ctx context.Context, content []byte) (string, e
 			return "", fmt.Errorf("shell command timed out after %s: %w",
 				x.timeout, ctx.Err())
 		}
-		// LookPath error (binary not in PATH).
-		if _, ok := err.(*exec.Error); ok {
-			return "", fmt.Errorf("shell command not found: %s: %w", cmdName, err)
+		// Process never started: binary not found, not executable, or
+		// permission denied. exec.CommandContext returns *os.PathError
+		// for absolute paths that don't exist and *exec.Error for PATH
+		// misses — checking either type explicitly misses the other.
+		// cmd.ProcessState == nil is the reliable signal: if the process
+		// never started, there's no ProcessState to read.
+		if cmd.ProcessState == nil {
+			return "", fmt.Errorf("shell command not found or not executable: %s: %w", cmdName, err)
 		}
 		// Exit non-zero: include exit code + stderr snippet.
 		stderrSnippet := strings.TrimSpace(stderr.String())
@@ -1890,7 +1906,29 @@ userNoteAddCmd.Flags().StringVar(&pdfEngine, "engine", "",
 		`Empty uses the config default (pdf.engine).`)
 ```
 
-**Also** update `resetNoteFlags` in `internal/cli/user_note_run_e_test.go:66-78` to reset `pdfEngine = ""` alongside the existing flags. Without this, package state leaks between tests and causes flaky runs.
+- [ ] **Step 9.5: Update `resetNoteFlags` test helper**
+
+The existing `resetNoteFlags` in `internal/cli/user_note_run_e_test.go:66-78` resets package-level flag vars to prevent state leakage between tests. Without adding `pdfEngine = ""` to it, a test that sets `--engine bogus` will leak that value into the next test, causing flaky failures — especially in `TestUserNoteAdd_PDF_PassesExtractorOverride` if it runs after `TestUserNoteAdd_PDF_UnknownEngineValue_Errors`.
+
+Modify `resetNoteFlags` (both the initial reset block AND the `t.Cleanup` block, since cobra flags persist after `Execute`):
+
+```go
+func resetNoteFlags(t *testing.T) {
+	t.Helper()
+	noteFilePath = ""
+	noteTitle = ""
+	noteTags = nil
+	flagJSON = false
+	pdfEngine = "" // NEW: reset between tests
+	t.Cleanup(func() {
+		noteFilePath = ""
+		noteTitle = ""
+		noteTags = nil
+		flagJSON = false
+		pdfEngine = "" // NEW: also reset on cleanup
+	})
+}
+```
 
 - [ ] **Step 10: Wire the runtime resolution into RunE**
 
@@ -2057,15 +2095,18 @@ func TestUserNoteAdd_PDF_PassesExtractorOverride(t *testing.T) {
 		"Content must come from the shell extractor's stdout")
 	assert.Equal(t, "text/plain", item.ContentMIME,
 		"MIME rewired to text/plain post-extraction")
-	pdfURI, ok := item.SourceMeta["original_uri"].(string)
-	require.True(t, ok, "SourceMeta.original_uri must be set")
-	assert.NotEmpty(t, pdfURI)
+	// emptyFileStore.Put returns ("", "", nil), so pdfURI is "" here —
+	// the *persistence* of the URI is covered by the service unit tests
+	// (TestIngestService_Create_PDF_ExtractsAndStoresBlob asserts NotEmpty
+	// against a real fsstore). This CLI test only asserts the key exists,
+	// proving the PDF branch in Create ran and wrote to SourceMeta.
+	_, ok := item.SourceMeta["original_uri"].(string)
+	assert.True(t, ok, "SourceMeta.original_uri key must exist after PDF branch ran")
+	assert.Equal(t, "application/pdf", item.SourceMeta["original_mime"])
 }
 ```
 
 Add imports to `user_note_run_e_test.go` as needed: `"os"`, `"path/filepath"`, `"runtime"`, `"time"`, `"uni-context/internal/config"`.
-
-**Note on `WithPDFExtractor(nil)`:** This explicit nil pass is defensive — it documents that the constructor default is intentionally unused. The CLI always supplies a per-call override via `WithExtractor`. Remove this arg if the linter complains; functionally identical.
 
 - [ ] **Step 12: Run CLI tests to verify pass**
 
