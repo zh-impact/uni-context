@@ -42,12 +42,13 @@ class CannedFileStore:
     put_calls: list[tuple[str, int]] = field(default_factory=list)
 
     def put(self, content: bytes, mime: str) -> tuple[str, str]:
-        # Brief says this is a stub, not a real impl — derive a stable
-        # URI from sha256 so get() round-trips. Production impl (Phase 2)
-        # uses file://<relative-path>; we use sha256://<hash> to make
-        # test assertions readable and avoid filesystem coupling.
+        # URI scheme matches production (Go fsstore uses file://<sha256-hex>;
+        # see archive/go/internal/adapter/fsstore/store.go:105) so
+        # service-layer tests catch URI-parsing issues honestly. The
+        # fake is dict-keyed by URI; the real impl uses the on-disk
+        # path under the sha256 hash, but the URI shape is identical.
         h = hashlib.sha256(content).hexdigest()
-        uri = f"sha256://{h}"
+        uri = f"file://{h}"
         self.data[uri] = content
         self.put_calls.append((mime, len(content)))
         return uri, h

@@ -14,11 +14,22 @@ FORBIDDEN_PATTERNS = [
 
 
 def test_cli_does_not_import_storage_impls():
-    """CLI must go through services, never storage/*_impl.py directly."""
+    """CLI command files must not import storage impls directly.
+
+    CLI command files (user_note.py, search.py, embed_cmd.py, doctor.py, ...)
+    must go through services, never storage/*_impl.py directly. cli/app.py is
+    the wire layer per Plan §Module Structure and is the ONLY cli/ file
+    permitted to import storage impls — it's where services are assembled
+    from concrete repos/stores. Mirrors Go's post-cleanup rule (commit 4cfc701).
+    """
     cli_dir = Path(__file__).parent.parent.parent / "src" / "unictx" / "cli"
     assert cli_dir.is_dir(), f"cli dir missing: {cli_dir}"
     offenders = []
     for py_file in cli_dir.rglob("*.py"):
+        # app.py is the wire layer per Plan §Module Structure; it's the
+        # legitimate boundary where storage impls are assembled into services.
+        if py_file.name == "app.py":
+            continue
         text = py_file.read_text()
         for pattern in FORBIDDEN_PATTERNS:
             for match in pattern.finditer(text):

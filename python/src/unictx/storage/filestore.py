@@ -28,7 +28,7 @@ class FileStore(Protocol):
     def put(self, content: bytes, mime: str) -> tuple[str, str]:
         """Write content and return (content_uri, sha256_hash).
 
-        content_uri is "file://<relative-path>". If content already
+        content_uri is "file://<sha256-hex>". If content already
         exists (matching hash), returns existing URI — idempotent.
         """
         ...

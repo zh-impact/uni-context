@@ -5,9 +5,11 @@ Phase-specific conftest.py files (e.g. tests/storage/conftest.py)
 live next to their tests and add fixtures only those tests need.
 
 The tmp_db fixture (in-memory SQLite via unictx.storage.db.open_db)
-is intentionally NOT here — storage.db doesn't exist until Phase 2
-Task 2.1. That task will add tmp_db to this file (see task-1.6 brief
-note: "defer tmp_db fixture to Phase 2 Task 2.1").
+is intentionally DEFERRED to Phase 2 Task 2.1 — storage.db doesn't
+exist yet, so the fixture has nothing to wrap. Phase 2 Task 2.1 will
+add tmp_db here (see task-1.6 brief note: "defer tmp_db fixture to
+Phase 2 Task 2.1"). Tests that today need a ContextRepo use the
+fake_repo fixture; tests that need real SQLite wait for Phase 2.
 """
 
 from __future__ import annotations
