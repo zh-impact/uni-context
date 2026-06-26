@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,4 +115,45 @@ embedder:
 	assert.Empty(t, cfg.Embedder.BaseURL)
 	assert.Empty(t, cfg.Embedder.Model)
 	assert.Equal(t, 0, cfg.Embedder.Dimension)
+}
+
+func TestLoad_PDFConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := []byte(`
+pdf:
+  engine: shell
+  engines:
+    shell:
+      command: 'pdftotext - -'
+      timeout: 30s
+    http:
+      url: 'http://localhost:8000/extract'
+      timeout: 45s
+      auth_token: 'secret'
+`)
+	require.NoError(t, os.WriteFile(path, yaml, 0o600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "shell", cfg.PDF.Engine)
+	require.Len(t, cfg.PDF.Engines, 2)
+
+	shell := cfg.PDF.Engines["shell"]
+	assert.Equal(t, "pdftotext - -", shell.Command)
+	assert.Equal(t, 30*time.Second, shell.Timeout)
+
+	http := cfg.PDF.Engines["http"]
+	assert.Equal(t, "http://localhost:8000/extract", http.URL)
+	assert.Equal(t, 45*time.Second, http.Timeout)
+	assert.Equal(t, "secret", http.AuthToken)
+}
+
+func TestLoad_PDFConfig_EmptyByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`user: { id: test }`), 0o600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.PDF.Engine, "PDF engine defaults to empty (disabled)")
+	assert.Nil(t, cfg.PDF.Engines, "PDF engines map defaults to nil")
 }

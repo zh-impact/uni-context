@@ -51,3 +51,36 @@ func TestWire_EmbedderDisabled_LeavesEmbeddingFieldsNil(t *testing.T) {
 	assert.Nil(t, a.Backfill)
 	assert.Nil(t, a.Worker)
 }
+
+func TestWire_PDFEnabled_NoError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir: dir,
+		PDF:     config.PDFConfig{Engine: "gxpdf"},
+	}
+	a, err := Wire(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+	// No public field exposes the extractor; the integration is verified
+	// end-to-end by the CLI tests in Task 8. Here we just assert Wire
+	// doesn't error when PDF is enabled with a valid engine.
+}
+
+func TestWire_PDFDisabled_NoError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{DataDir: dir} // PDF zero-valued → Engine=""
+	a, err := Wire(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = a.Close() })
+}
+
+func TestWire_PDFMisconfigured_Errors(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir: dir,
+		PDF:     config.PDFConfig{Engine: "shell"}, // Engines map nil → no command
+	}
+	_, err := Wire(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pdf")
+}

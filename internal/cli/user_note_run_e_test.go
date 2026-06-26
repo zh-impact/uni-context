@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
@@ -69,11 +71,13 @@ func resetNoteFlags(t *testing.T) {
 	noteTitle = ""
 	noteTags = nil
 	flagJSON = false
+	pdfEngine = ""
 	t.Cleanup(func() {
 		noteFilePath = ""
 		noteTitle = ""
 		noteTags = nil
 		flagJSON = false
+		pdfEngine = ""
 	})
 }
 
@@ -159,4 +163,132 @@ func TestUserNoteAddCmd_RunEPropagatesValidationError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stat file:")
 	assert.Empty(t, repo.created)
+}
+
+// TestUserNoteAdd_PDF_NoEngineNoConfig_Errors: --file paper.pdf with no
+// pdf.engine in config and no --engine flag must surface a clear "pdf
+// extraction not configured" error, and no item should be persisted.
+func TestUserNoteAdd_PDF_NoEngineNoConfig_Errors(t *testing.T) {
+	repo := &capturingRepo{}
+	a := newStubApp(t)
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
+
+	// Custom swap: PDF.Engine = "" (disabled)
+	prev := userNoteLoadAppFn
+	userNoteLoadAppFn = func() (*app.App, *config.Config, error) {
+		return a, &config.Config{
+			User: config.UserConfig{ID: "test-user"},
+			PDF:  config.PDFConfig{Engine: ""}, // PDF not configured
+		}, nil
+	}
+	t.Cleanup(func() { userNoteLoadAppFn = prev })
+	resetNoteFlags(t)
+
+	// Fake .pdf path — the file content doesn't matter because the
+	// error fires before any extractor runs. Use a temp file so
+	// validateFileImport's stat check passes.
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "paper.pdf")
+	require.NoError(t, os.WriteFile(pdfPath, []byte("%PDF-1.4 fake"), 0o644))
+
+	rootCmd.SetArgs([]string{"user", "note", "add", "--file", pdfPath})
+	rootCmd.SetOut(new(bytes.Buffer))
+	rootCmd.SetErr(new(bytes.Buffer))
+	err := rootCmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pdf extraction not configured")
+	assert.Empty(t, repo.created, "no item should be created on validation failure")
+}
+
+// TestUserNoteAdd_PDF_UnknownEngineValue_Errors: --engine bogus fails
+// the upfront engine-name validation BEFORE any IO or extractor build.
+func TestUserNoteAdd_PDF_UnknownEngineValue_Errors(t *testing.T) {
+	repo := &capturingRepo{}
+	a := newStubApp(t)
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
+	restore := swapUserNoteLoadAppFn(a)
+	defer restore()
+	resetNoteFlags(t)
+
+	// --engine bogus fails validation BEFORE any IO. No file needed
+	// on disk, but we still pass one so earlier checks (mutual
+	// exclusion, stat) don't fire first.
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "paper.pdf")
+	require.NoError(t, os.WriteFile(pdfPath, []byte("%PDF-1.4 fake"), 0o644))
+
+	rootCmd.SetArgs([]string{"user", "note", "add", "--file", pdfPath, "--engine", "bogus"})
+	rootCmd.SetOut(new(bytes.Buffer))
+	rootCmd.SetErr(new(bytes.Buffer))
+	err := rootCmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown pdf engine")
+	assert.Contains(t, err.Error(), "bogus")
+	assert.Empty(t, repo.created, "no item should be created on engine validation failure")
+}
+
+// TestUserNoteAdd_PDF_PassesExtractorOverride exercises the full path:
+// --file paper.pdf + Config.PDF.Engine=shell with Engines[shell].Command
+// pointing at a temp shell script that echoes canned text. Verifies the
+// extractor runs end-to-end and the resulting item.Content matches.
+func TestUserNoteAdd_PDF_PassesExtractorOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-engine test relies on chmod +x; skip on Windows")
+	}
+	// Stub script that prints canned extracted text to stdout, exits 0.
+	stub, err := os.CreateTemp("", "pdf-stub-*")
+	require.NoError(t, err)
+	_, err = stub.WriteString("#!/bin/sh\necho 'shell extracted text'\n")
+	require.NoError(t, err)
+	require.NoError(t, stub.Close())
+	require.NoError(t, os.Chmod(stub.Name(), 0o755))
+
+	repo := &capturingRepo{}
+	a := newStubApp(t)
+	// No WithPDFExtractor here — the CLI passes the extractor per-call via
+	// WithExtractor (BuildExtractorForEngine builds it from Config). The
+	// constructor-level extractor from app.Wire is bypassed in this test
+	// because we're constructing IngestService directly.
+	a.Ingest = service.NewIngestService(repo, emptyFileStore{}, io.Discard)
+
+	// Custom swap: PDF.Engine=shell, Engines.shell.Command=<stub>
+	prev := userNoteLoadAppFn
+	userNoteLoadAppFn = func() (*app.App, *config.Config, error) {
+		return a, &config.Config{
+			User: config.UserConfig{ID: "test-user"},
+			PDF: config.PDFConfig{
+				Engine: "shell",
+				Engines: map[string]config.EngineConfig{
+					"shell": {Command: stub.Name(), Timeout: 5 * time.Second},
+				},
+			},
+		}, nil
+	}
+	t.Cleanup(func() { userNoteLoadAppFn = prev })
+	resetNoteFlags(t)
+
+	// Tiny .pdf fixture — content doesn't matter; the stub ignores stdin.
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "paper.pdf")
+	require.NoError(t, os.WriteFile(pdfPath, []byte("%PDF-1.4 fake bytes"), 0o644))
+
+	rootCmd.SetArgs([]string{"user", "note", "add", "--file", pdfPath, "--title", "paper"})
+	rootCmd.SetOut(new(bytes.Buffer))
+	rootCmd.SetErr(new(bytes.Buffer))
+	require.NoError(t, rootCmd.Execute())
+
+	require.Len(t, repo.created, 1)
+	item := repo.created[0]
+	assert.Equal(t, "shell extracted text\n", item.Content,
+		"Content must come from the shell extractor's stdout")
+	assert.Equal(t, "text/plain", item.ContentMIME,
+		"MIME rewired to text/plain post-extraction")
+	// emptyFileStore.Put returns ("", "", nil), so pdfURI is "" here —
+	// the *persistence* of the URI is covered by the service unit tests
+	// (TestIngestService_Create_PDF_ExtractsAndStoresBlob asserts NotEmpty
+	// against a real fsstore). This CLI test only asserts the key exists,
+	// proving the PDF branch in Create ran and wrote to SourceMeta.
+	_, ok := item.SourceMeta["original_uri"].(string)
+	assert.True(t, ok, "SourceMeta.original_uri key must exist after PDF branch ran")
+	assert.Equal(t, "application/pdf", item.SourceMeta["original_mime"])
 }

@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -330,4 +332,252 @@ func TestIngest_Create_ExternalizedContentIsFTSSearchable(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Results, 1, "externalized content must be FTS-searchable post-ReindexFTS")
 	assert.Equal(t, id, resp.Results[0].Item.ID)
+}
+
+// TestIngestService_Create_PDF_ErrorsWithoutExtractor locks in the
+// "PDF not configured" guard: when MIME=application/pdf arrives and no
+// extractor was supplied (neither constructor nor per-call), Create must
+// return a clear actionable error pointing at pdf.engine / --engine
+// rather than silently persisting raw PDF bytes as if they were text.
+func TestIngestService_Create_PDF_ErrorsWithoutExtractor(t *testing.T) {
+	f := newIngestFixture(t)
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf) // no WithPDFExtractor
+
+	_, err := svc.Create(context.Background(), Input{
+		Scope:       domain.ScopeUser,
+		Kind:        domain.KindNote,
+		Source:      domain.SourceManual,
+		OwnerUserID: "u1",
+		Title:       "paper",
+		Content:     "%PDF-1.4 fake",
+		MIME:        "application/pdf",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pdf extraction not configured")
+	assert.Contains(t, err.Error(), "pdf.engine")
+}
+
+// fakePDFExtractor is a port.PDFExtractor double for service tests.
+// Records the bytes it was called with so tests can assert override
+// behavior (WithExtractor must receive the raw PDF bytes, not extracted
+// text). Returns the configured text + err on each call.
+type fakePDFExtractor struct {
+	called   bool
+	gotBytes []byte
+	text     string
+	err      error
+}
+
+func (f *fakePDFExtractor) Extract(_ context.Context, content []byte) (string, error) {
+	f.called = true
+	f.gotBytes = content
+	return f.text, f.err
+}
+
+// TestIngestService_Create_PDF_ExtractsAndStoresBlob is the happy path:
+// text is extracted, raw PDF bytes are stored in FileStore, and the
+// resulting item carries the extracted text + the original_uri pointer.
+func TestIngestService_Create_PDF_ExtractsAndStoresBlob(t *testing.T) {
+	f := newIngestFixture(t)
+	ext := &fakePDFExtractor{text: "extracted body text"}
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf, WithPDFExtractor(ext))
+
+	id, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Title: "paper",
+		Content: "%PDF-1.4 fake", MIME: "application/pdf",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+	require.True(t, ext.called, "extractor must be called")
+	assert.Equal(t, "%PDF-1.4 fake", string(ext.gotBytes),
+		"extractor receives the raw PDF bytes")
+
+	item, err := f.repo.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, "extracted body text", item.Content,
+		"Content is the extracted text")
+	assert.Equal(t, "text/plain", item.ContentMIME,
+		"MIME rewired to text/plain post-extraction")
+	pdfURI, ok := item.SourceMeta["original_uri"].(string)
+	require.True(t, ok, "SourceMeta.original_uri must be a string")
+	assert.NotEmpty(t, pdfURI, "SourceMeta.original_uri must be set")
+	assert.Equal(t, "application/pdf", item.SourceMeta["original_mime"])
+}
+
+// TestIngestService_Create_PDF_EmptyExtraction_StoresBlobEmptyContent
+// locks in the image-only-PDF contract: extracted text is "" but the
+// blob is still stored, AND the embed path is skipped (no title-only
+// vectors for an unreadable-as-text body).
+//
+// Uses a real SQLite-backed repo+vs so the embedder's vector write
+// would actually land if the skip logic didn't fire. This makes the test
+// positively assert "no vector written" rather than just "log line
+// present" — much stronger.
+func TestIngestService_Create_PDF_EmptyExtraction_StoresBlobEmptyContent(t *testing.T) {
+	vs, repo, db := newMemVectorStore(t)
+	defer db.Close()
+	emb := fake.New("fake-model", 8)
+	embedSvc := NewEmbedService(emb, vs, repo, newMemFileStore(t), newMemEmbeddingRepo(t, db), io.Discard)
+
+	// Capture log so we can assert on the skip warning.
+	var logBuf bytes.Buffer
+	ext := &fakePDFExtractor{text: ""} // image-only PDF
+	ingestFS := newMemFileStore(t)
+	svc := NewIngestServiceWithEmbedder(repo, ingestFS, embedSvc, &logBuf, WithPDFExtractor(ext))
+
+	id, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Title: "image-only paper",
+		Content: "%PDF-1.4 fake", MIME: "application/pdf",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	item, err := repo.Get(context.Background(), id)
+	require.NoError(t, err)
+	assert.Empty(t, item.Content, "Content is empty for image-only PDF")
+	pdfURI, ok := item.SourceMeta["original_uri"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, pdfURI, "PDF blob URI still captured")
+
+	logStr := logBuf.String()
+	assert.Contains(t, logStr, "pdf extraction yielded no text")
+	assert.Contains(t, logStr, "skipping embed")
+
+	// Stronger assertion: no vector was actually written. If the skip
+	// logic missed (e.g. only checked item.Content without the pdfURI
+	// scope), the constructor-default embed would fire and a vector for
+	// the title would land in vs.
+	vecs, _ := emb.Embed(context.Background(), []string{"image-only paper\n\n"})
+	hits, err := vs.Search(context.Background(), port.VectorQuery{
+		Vector: vecs[0], Model: "fake-model", Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, hits, "no vector should be written for image-only PDF")
+}
+
+// TestIngestService_Create_PDF_PropagatesExtractorError verifies that
+// extraction failures (encrypted, malformed, IO, downstream 5xx) are
+// wrapped and returned — not silently swallowed into an empty-content
+// item. Empty extraction is a different path (returns "", nil).
+func TestIngestService_Create_PDF_PropagatesExtractorError(t *testing.T) {
+	f := newIngestFixture(t)
+	ext := &fakePDFExtractor{err: errors.New("encrypted pdf: password required")}
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf, WithPDFExtractor(ext))
+
+	_, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Content: "fake", MIME: "application/pdf",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extract pdf")
+	assert.Contains(t, err.Error(), "encrypted pdf")
+}
+
+// TestIngestService_Create_PDF_WithExtractorOverride verifies per-call
+// override semantics: even when the constructor did NOT wire an
+// extractor (PDF disabled by default), the CLI can supply one for this
+// invocation via WithExtractor. The constructor default for next call
+// remains unaffected (not tested here — constructor state is immutable
+// after NewIngestService returns).
+func TestIngestService_Create_PDF_WithExtractorOverride(t *testing.T) {
+	// Constructor default is nil (PDF not configured); per-call
+	// override via WithExtractor supplies the extractor for this call.
+	f := newIngestFixture(t)
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf) // no WithPDFExtractor
+
+	ext := &fakePDFExtractor{text: "from override"}
+	id, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Content: "fake", MIME: "application/pdf",
+	}, WithExtractor(ext))
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+	require.True(t, ext.called, "override extractor must be called")
+
+	item, _ := f.repo.Get(context.Background(), id)
+	assert.Equal(t, "from override", item.Content)
+}
+
+// TestIngestService_Create_PDF_LargeExtractedText_ExternalizesTextOnly
+// verifies the rewiring carries through the externalize path: extracted
+// text > 4KB triggers fs.Put (text URI on item.ContentURI), while the
+// PDF blob URI lives separately on SourceMeta.original_uri. The two
+// URIs must be distinct — conflating them would mean FTS hydration
+// pulls PDF bytes instead of text.
+func TestIngestService_Create_PDF_LargeExtractedText_ExternalizesTextOnly(t *testing.T) {
+	f := newIngestFixture(t)
+	// Build extracted text > 4KB so existing externalization fires.
+	big := strings.Repeat("a", 5000)
+	ext := &fakePDFExtractor{text: big}
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf, WithPDFExtractor(ext))
+
+	id, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Content: "%PDF fake", MIME: "application/pdf",
+	})
+	require.NoError(t, err)
+
+	item, err := f.repo.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.NotEmpty(t, item.ContentURI, "extracted text externalized → ContentURI set")
+	assert.Empty(t, item.Content, "Content is empty when externalized")
+
+	pdfURI, _ := item.SourceMeta["original_uri"].(string)
+	require.NotEmpty(t, pdfURI, "PDF blob URI captured in SourceMeta")
+	assert.NotEqual(t, item.ContentURI, pdfURI,
+		"text URI and PDF URI must be distinct")
+}
+
+// TestIngestService_Create_PDF_RollsBackBothBlobsOnRepoFailure mirrors
+// the existing TestIngest_Create_RollsBackFileStoreOnRepoFailure
+// pattern: force repo.Create to fail, then walk fsRoot to confirm NO
+// orphan files remain. In the PDF path with large extracted text, TWO
+// fs.Put calls happen before repo.Create (PDF blob + externalized
+// text), so rollback must fs.Delete BOTH. If only one is cleaned up,
+// fsRoot will contain leftover files and the test fails.
+func TestIngestService_Create_PDF_RollsBackBothBlobsOnRepoFailure(t *testing.T) {
+	f := newIngestFixture(t)
+	// Force repo.Create to fail. fakeRepo.createErr is the unexported
+	// failure-injection point; tests are in the same package so they
+	// can set it directly (no setter method exists).
+	f.repo.createErr = errors.New("simulated DB outage")
+
+	// Extracted text > 4KB so externalization fires BEFORE the failing
+	// repo.Create. This means at the point repo.Create runs, fs has TWO
+	// blobs: the PDF blob (Put in PDF branch) and the text blob (Put in
+	// externalize step). Both must be rolled back.
+	big := strings.Repeat("a", 5000)
+	ext := &fakePDFExtractor{text: big}
+	var logBuf bytes.Buffer
+	svc := NewIngestService(f.repo, f.fs, &logBuf, WithPDFExtractor(ext))
+
+	_, err := svc.Create(context.Background(), Input{
+		Scope: domain.ScopeUser, Kind: domain.KindNote, Source: domain.SourceManual,
+		OwnerUserID: "u1", Content: "%PDF fake", MIME: "application/pdf",
+	})
+	require.Error(t, err)
+
+	// fsRoot must be empty: both blobs deleted by the extended rollback.
+	// Pattern lifted from TestIngest_Create_RollsBackFileStoreOnRepoFailure.
+	var orphans []string
+	walkErr := filepath.WalkDir(f.fsRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		orphans = append(orphans, path)
+		return nil
+	})
+	require.NoError(t, walkErr)
+	assert.Empty(t, orphans,
+		"both PDF blob and text blob must be rolled back; found orphaned files: %v", orphans)
 }

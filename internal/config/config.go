@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -14,6 +15,7 @@ type Config struct {
 	User     UserConfig     `yaml:"user"`
 	DataDir  string         `yaml:"data_dir"`
 	Embedder EmbedderConfig `yaml:"embedder"`
+	PDF      PDFConfig      `yaml:"pdf"`
 }
 
 type UserConfig struct {
@@ -49,6 +51,30 @@ type EmbedderConfig struct {
 	// servers (LMStudio, vLLM) typically ignore it. When empty, the
 	// OpenAI adapter omits the Authorization header entirely.
 	APIKey string `yaml:"api_key"`
+}
+
+// PDFConfig controls the optional PDF text-extraction pipeline. When
+// Engine is empty (the default), PDF support is disabled: passing
+// Input with MIME "application/pdf" to IngestService.Create returns
+// a clear "pdf extraction not configured" error. When Engine is set
+// ("gxpdf", "shell", or "http"), app.Wire constructs the matching
+// adapter and injects it into IngestService.
+//
+// Unlike EmbedderConfig, no defaults pass runs in Load — the only
+// meaningful default (30s timeout) is applied at the factory layer
+// where the engine type is concrete.
+type PDFConfig struct {
+	Engine  string                  `yaml:"engine"` // gxpdf | shell | http; empty = disabled
+	Engines map[string]EngineConfig `yaml:"engines"`
+}
+
+// EngineConfig holds engine-specific fields. Only the fields relevant
+// to the chosen engine are populated; others stay zero-valued.
+type EngineConfig struct {
+	Command   string        `yaml:"command"`    // shell: "pdftotext - -"
+	URL       string        `yaml:"url"`        // http: "http://localhost:8000/extract"
+	Timeout   time.Duration `yaml:"timeout"`    // both; zero -> 30s at factory time
+	AuthToken string        `yaml:"auth_token"` // http: sent as Authorization: Bearer
 }
 
 // Load reads config from path (if it exists) and applies defaults.
