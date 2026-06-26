@@ -90,7 +90,7 @@ python/
 │   │   └── diagnostic.py      # DiagnosticService (schema + ping)
 │   │
 │   ├── pdf/                   # PDF extractor engines + factory
-│   │   ├── errors.py          # PDFEncrypted, PDFExtractionFailed
+│   │   ├── errors.py          # PDFEncrypted, PDFExtractionFailed, PDFCommandNotFound
 │   │   ├── extractor.py       # Protocol: PDFExtractor
 │   │   ├── fitz_engine.py     # PyMuPDF (default)
 │   │   ├── shell_engine.py    # subprocess wrapper
@@ -428,10 +428,13 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
 
   class Config(BaseModel):
       user: UserConfig = Field(default_factory=UserConfig)
-      data_dir: Path               # XDG default at load time
+      data_dir: Path = Field(default_factory=lambda: xdg_data_home() / "unictx")
       embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
       pdf: PdfConfig = Field(default_factory=PdfConfig)
   ```
+  `data_dir` has a `default_factory` so `Config.model_validate({})` works
+  even when YAML omits the field. `xdg_data_home()` is the module-level
+  helper that resolves `$XDG_DATA_HOME` → `~/.local/share`.
 - [ ] `load(path: Path | None) -> Config`:
   - Resolve path via XDG (`$XDG_CONFIG_HOME/unictx/config.yaml` →
     `~/.config/unictx/config.yaml`). Same logic as Go.
@@ -810,18 +813,35 @@ Port `internal/service/ingest.go`:
 
 ### Task 5.3 — `embed/service.py` — EmbedService
 
-- [ ] `embed_item(item, model_slug)` — hydrate content if externalized
-  (mirror Go's `hydrateContent`), call embedder, then split the write:
-  - **Vector → `VectorStore.put(item_id, model_slug, vector)`** (vec0
-    virtual table; Task 2.5)
-  - **Status → `EmbeddingRepo.upsert_status(item_id, model_slug, status,
-    err_str)`** (regular table; Task 2.6)
-- [ ] Status always written on every path (success → status='done',
-  failure → status='failed' + last_error + attempts++). Vector only
-  written on success.
-- [ ] Tests: happy path (vector + status both written); empty content
-  (skip embed, status='skipped'); embedder failure (status='failed',
-  no vector written); status row present on all paths
+Port `internal/service/embed.go`. EmbedService is reached via Worker /
+Backfill / Reembed (NOT via IngestService — its skipEmbed short-circuits
+before calling Embed, see §3.5 + Go ingest.go:273-280).
+
+- [ ] `embed_item(item_id, title, content, model_slug)` flow:
+  1. If `content` empty, hydrate from FileStore via `ContentURI`
+     (mirror Go's `hydrateContent`).
+  2. If still empty after hydration: record `status='failed'` with
+     err_str=`"embed: empty text for item <id>"` and **return the error**
+     (matches Go embed.go:84-89). **NO 'skipped' status** — Go schema
+     has only 'done' and 'failed'. Don't invent new states.
+  3. Call `embedder.Embed([text])`.
+  4. Split the write:
+     - **Vector → `VectorStore.put(item_id, model_slug, vector)`** (vec0
+       virtual table; Task 2.5)
+     - **Status → `EmbeddingRepo.upsert_status(item_id, model_slug,
+       'done', "")`** (regular table; Task 2.6)
+  5. **Flip `any_embedding=1` on the context_item** (Go embed.go:107-120).
+     Read item via `repo.get(id)`, set `item.any_embedding = 1`, call
+     `repo.update(item)`. Flag-write failure is non-fatal: status stays
+     'done' (vec row is the source of truth for "embedded"), warning
+     logged.
+- [ ] Status always written on every path (success → 'done', failure →
+  'failed' + last_error + attempts++). Vector only written on success.
+- [ ] Tests: happy path (vector + status='done' + any_embedding=1);
+  empty content after hydration (status='failed', no vector, error
+  raised); embedder failure (status='failed', no vector); VectorStore
+  failure (status='failed', no flag flip); any_embedding flag-write
+  failure (status stays 'done', warning logged, no error raised)
 - [ ] Commit: `feat(embed): EmbedService with split vector/status writes`
 
 ### Task 5.4 — `embed/worker.py` + `embed/backfill.py` + `embed/reembed.py`
@@ -866,9 +886,32 @@ Port `internal/service/ingest.go`:
   (the only place that imports `storage/*_impl.py` directly — everything
   else goes through service Protocols)
 - [ ] `cli/output.py:format_result(result, json_mode)` — shared output
-  helper. When `json_mode=True`, `json.dumps(result, default=pydantic_serializer,
-  indent=2)`. Otherwise, render via `rich` table or plain print. Used by
-  every subcommand's `--json` path.
+  helper. When `json_mode=True`, serialize via:
+  ```python
+  import json
+  from pathlib import Path
+  from dataclasses import asdict
+
+  def _default(obj):
+      if isinstance(obj, Path):
+          return str(obj)
+      if hasattr(obj, "isoformat"):  # datetime
+          return obj.isoformat()
+      raise TypeError(f"not serializable: {type(obj)}")
+
+  def format_result(result, json_mode: bool) -> None:
+      if json_mode:
+          # dataclasses.asdict handles ContextItem/Project/SearchHit;
+          # _default catches Path/datetime at the leaves.
+          data = asdict(result) if hasattr(result, "__dataclass_fields__") else result
+          typer.echo(json.dumps(data, default=_default, indent=2))
+      else:
+          # rich table rendering — per-command in their cli/*_cmd.py
+          typer.echo(result)
+  ```
+  Domain models are `@dataclass(slots=True)` (not Pydantic), so
+  `dataclasses.asdict` is the right starting point — Pydantic's serializer
+  doesn't apply here. Used by every subcommand's `--json` path.
 - [ ] Commit: `feat(cli): typer skeleton with global flags + wiring + output`
 
 ### Task 6.2 — `cli/user_note.py` — `user note` subcommands
