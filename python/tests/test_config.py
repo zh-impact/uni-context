@@ -427,25 +427,20 @@ def test_user_config_default_id():
     assert u.id == "default"
 
 
-def test_user_config_explicit_empty_string_falls_through(tmp_path: Path):
-    """`user.id: ''` is NOT auto-defaulted to 'default'.
+def test_user_config_explicit_empty_string_coalesces_to_default(tmp_path: Path):
+    """`user.id: ''` coalesces back to 'default'.
 
-    Deviation from Go: Go's Load explicitly re-applies `id="default"`
-    after parse when ID=="" (config.go:98-100). Pydantic's field default
-    only applies when the field is *absent* — an explicit empty string
-    passes through unchanged. This matches the brief's code (no
-    validator), and the resulting config is trivially distinguishable
-    from a default config via `cfg.user.id == ""`. CLI/UI consumers
-    should treat empty user.id as "use a sensible default at use-site"
-    rather than relying on this layer to coalesce.
+    Mirrors Go's post-load fixup at config.go:98-100
+    (`if cfg.User.ID == "" { cfg.User.ID = "default" }`). Pydantic's
+    field default fires only on *absent* field; the `model_validator`
+    on `UserConfig` handles the explicit-empty-string case to restore
+    Go parity.
     """
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("user:\n  id: ''\n", encoding="utf-8")
 
     cfg = load(cfg_path)
-    # Documents ACTUAL behavior — if Go-parity is required, a follow-up
-    # task would add a model_validator mirroring config.go:98-100.
-    assert cfg.user.id == ""
+    assert cfg.user.id == "default"
 
 
 # ---------------------------------------------------------------------------

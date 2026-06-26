@@ -52,13 +52,21 @@ def xdg_config_home() -> Path:
 class UserConfig(BaseModel):
     """Owner identity for new items. Default 'default'.
 
-    Mirrors Go's `UserConfig` struct. Go's Load applies `id="default"`
-    when the field is empty after parsing (config.go:98-100); Pydantic's
-    field default reproduces that without a post-load step.
+    Mirrors Go's `UserConfig` struct. The field default 'default' fires
+    only when `user.id` is *absent* from the YAML; an explicit empty
+    string (`user.id: ""`) is coalesced back to 'default' by the
+    `model_validator` below, reproducing Go's post-load fixup at
+    config.go:98-100 (`if cfg.User.ID == "" { cfg.User.ID = "default" }`).
     """
 
     model_config = _STRICT
     id: str = "default"
+
+    @model_validator(mode="after")
+    def coalesce_empty_id(self) -> UserConfig:
+        if self.id == "":
+            self.id = "default"
+        return self
 
 
 class EmbedderConfig(BaseModel):
@@ -149,11 +157,11 @@ class PdfConfig(BaseModel):
 class Config(BaseModel):
     """Root config. Mirrors Go's `Config` struct.
 
-    `data_dir` uses a `default_factory` so `Config.model_validate({})`
-    resolves correctly even when YAML omits the field. Go applies
-    `defaultDataDir()` post-load (config.go:95-97) when the YAML leaves
-    it empty; Pydantic's field default reproduces that for the empty
-    case without a post-load step.
+    `data_dir` uses a `default_factory` so an *absent* field resolves to
+    `xdg_data_home()/"unictx"`. An explicit empty string (`data_dir: ""`)
+    is coalesced by the `model_validator` below, reproducing Go's
+    post-load fixup at config.go:95-97
+    (`if cfg.DataDir == "" { cfg.DataDir = defaultDataDir() }`).
     """
 
     model_config = _STRICT
@@ -161,6 +169,15 @@ class Config(BaseModel):
     data_dir: Path = Field(default_factory=lambda: xdg_data_home() / "unictx")
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
+
+    @model_validator(mode="after")
+    def coalesce_empty_data_dir(self) -> Config:
+        # Pydantic's Path validator materializes both `""` and `"."` as
+        # `Path(".")`. Treat both as empty to keep parity with Go's
+        # `cfg.DataDir == ""` check (the brief's verbatim quote).
+        if str(self.data_dir) in {"", "."}:
+            self.data_dir = xdg_data_home() / "unictx"
+        return self
 
 
 def load(path: Path | None = None) -> Config:
