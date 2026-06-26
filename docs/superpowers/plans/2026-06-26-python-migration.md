@@ -117,7 +117,7 @@ python/
 │       ├── embed_cmd.py       # embed model/worker/backfill/reembed/status
 │       ├── doctor.py          # doctor
 │       ├── reindex_fts_cmd.py # reindex-fts
-│       └── output.py          # format_result(result, json_mode) shared helper
+│       └── output.py          # print_json(result) shared helper (mirrors Go printJSON)
 │
 └── tests/
     ├── conftest.py            # @pytest.fixture wrappers around _fakes/
@@ -173,9 +173,10 @@ These are project-wide code conventions. Every task inherits them.
   `db.row_factory = scan_item` in `storage/db.py`. Returns `ContextItem`
   directly. Replaces Go's per-method `scan_item` helper; keeps query
   code SQL-focused.
-- **CLI JSON output: shared `cli/output.py:format_result(result, json_mode)`.**
-  Every `--json` flag routes through this helper. No per-command
-  `json.dumps` calls. Non-JSON path uses rich tables.
+- **CLI JSON output: shared `cli/output.py:print_json(result)`.**
+  Every `--json` flag routes through this single-purpose helper.
+  Non-JSON output is rendered per-command with rich tables or plain
+  print — `print_json` does NOT branch.
 - **Import restrictions enforced by ruff.** `cli/*` CANNOT import
   `storage/*_impl.py` directly (must go through services). Configured
   via `[tool.ruff.lint.per-file-ignores]` or `import-restrictions` rule.
@@ -567,7 +568,8 @@ Port `internal/adapter/sqlite/migrations.go`:
 
 Port `internal/adapter/sqlite/repo.go`:
 - [ ] `create(item)` — INSERT, AFTER INSERT trigger writes FTS row
-- [ ] `get(id)` — SELECT; return `NotFoundError` if missing
+- [ ] `get(id)` — SELECT; **raise** `items/errors.py:ItemNotFound` if
+  missing (not return, not bare `KeyError`).
 - [ ] `update(item)` — UPDATE with version increment; AFTER UPDATE
   trigger rewrites FTS row
 - [ ] `delete(id)` — DELETE; AFTER DELETE trigger removes FTS row
@@ -579,8 +581,6 @@ Port `internal/adapter/sqlite/repo.go`:
 - [ ] `storage/row_factory.py:scan_item(cursor, row)` — JSON decode tags
   + source_meta, handle NULL. Registered globally as `db.row_factory`
   in `storage/db.py` so every SELECT returns `ContextItem` directly.
-- [ ] Raise `items/errors.py:ItemNotFound` (not bare `KeyError`) when
-  `get()` finds no row.
 - [ ] Tests: roundtrip create/get/update/delete; list pagination;
   reindex_fts for externalized; cursor format cross-checked with Go
 - [ ] Commit: `feat(storage): ContextRepo impl with base36 cursor + reindex_fts`
@@ -817,20 +817,31 @@ Port `internal/service/embed.go`. EmbedService is reached via Worker /
 Backfill / Reembed (NOT via IngestService — its skipEmbed short-circuits
 before calling Embed, see §3.5 + Go ingest.go:273-280).
 
-- [ ] `embed_item(item_id, title, content, model_slug)` flow:
-  1. If `content` empty, hydrate from FileStore via `ContentURI`
-     (mirror Go's `hydrateContent`).
-  2. If still empty after hydration: record `status='failed'` with
-     err_str=`"embed: empty text for item <id>"` and **return the error**
-     (matches Go embed.go:84-89). **NO 'skipped' status** — Go schema
-     has only 'done' and 'failed'. Don't invent new states.
-  3. Call `embedder.Embed([text])`.
-  4. Split the write:
+**Signature matches Go `Embed(ctx, itemID, title, content string) error`**
+(embed.go:67) — NOT `EmbedItem(ctx, item, model_slug)`. Go passes
+id+title+content strings, not a full ContextItem. `model_slug` is
+**derived internally** from `embedder.Model().slug` (Go embed.go:69);
+it's not a parameter. Hydration works by calling `repo.get(item_id)`
+internally to fetch the full item (including `content_uri`).
+
+- [ ] `embed_item(item_id, title, content)` flow:
+  1. `model_slug = self.embedder.Model().slug` (derived, not parameter)
+  2. If `content` empty, hydrate via `_hydrate_content(item_id)`:
+     - `item = repo.get(item_id)` — fetches full ContextItem
+     - If `item.content`: return it
+     - If `item.content_uri`: `fs.get(item.content_uri)`
+     - Else: return "" (title-only embed case)
+  3. `text = (title + "\n\n" + content).strip()`. If empty: record
+     `status='failed'` with err_str=`"embed: empty text for item <id>"`
+     and **return the error** (Go embed.go:84-89). **NO 'skipped'
+     status** — Go schema has only 'done' and 'failed'.
+  4. Call `embedder.Embed([text])`.
+  5. Split the write:
      - **Vector → `VectorStore.put(item_id, model_slug, vector)`** (vec0
        virtual table; Task 2.5)
      - **Status → `EmbeddingRepo.upsert_status(item_id, model_slug,
        'done', "")`** (regular table; Task 2.6)
-  5. **Flip `any_embedding=1` on the context_item** (Go embed.go:107-120).
+  6. **Flip `any_embedding=1` on the context_item** (Go embed.go:107-120).
      Read item via `repo.get(id)`, set `item.any_embedding = 1`, call
      `repo.update(item)`. Flag-write failure is non-fatal: status stays
      'done' (vec row is the source of truth for "embedded"), warning
@@ -841,7 +852,8 @@ before calling Embed, see §3.5 + Go ingest.go:273-280).
   empty content after hydration (status='failed', no vector, error
   raised); embedder failure (status='failed', no vector); VectorStore
   failure (status='failed', no flag flip); any_embedding flag-write
-  failure (status stays 'done', warning logged, no error raised)
+  failure (status stays 'done', warning logged, no error raised);
+  model_slug comes from embedder not parameter
 - [ ] Commit: `feat(embed): EmbedService with split vector/status writes`
 
 ### Task 5.4 — `embed/worker.py` + `embed/backfill.py` + `embed/reembed.py`
@@ -885,8 +897,9 @@ before calling Embed, see §3.5 + Go ingest.go:273-280).
 - [ ] App wiring: `wire(cfg)` returns a container with all services
   (the only place that imports `storage/*_impl.py` directly — everything
   else goes through service Protocols)
-- [ ] `cli/output.py:format_result(result, json_mode)` — shared output
-  helper. When `json_mode=True`, serialize via:
+- [ ] `cli/output.py:print_json(result)` — single-purpose JSON helper,
+  mirrors Go's `printJSON(v)` (output.go). NOT a branching `format_result`
+  — non-JSON output is rendered per-command with rich tables.
   ```python
   import json
   from pathlib import Path
@@ -899,19 +912,19 @@ before calling Embed, see §3.5 + Go ingest.go:273-280).
           return obj.isoformat()
       raise TypeError(f"not serializable: {type(obj)}")
 
-  def format_result(result, json_mode: bool) -> None:
-      if json_mode:
-          # dataclasses.asdict handles ContextItem/Project/SearchHit;
-          # _default catches Path/datetime at the leaves.
-          data = asdict(result) if hasattr(result, "__dataclass_fields__") else result
-          typer.echo(json.dumps(data, default=_default, indent=2))
-      else:
-          # rich table rendering — per-command in their cli/*_cmd.py
-          typer.echo(result)
+  def print_json(result) -> None:
+      """Print result as indented JSON to stdout.
+
+      dataclasses.asdict handles ContextItem/Project/SearchHit;
+      _default catches Path/datetime at the leaves. Domain models are
+      @dataclass(slots=True) (not Pydantic), so Pydantic's serializer
+      doesn't apply.
+      """
+      data = asdict(result) if hasattr(result, "__dataclass_fields__") else result
+      typer.echo(json.dumps(data, default=_default, indent=2))
   ```
-  Domain models are `@dataclass(slots=True)` (not Pydantic), so
-  `dataclasses.asdict` is the right starting point — Pydantic's serializer
-  doesn't apply here. Used by every subcommand's `--json` path.
+  Each subcommand does: `if json_mode: print_json(result); else:
+  <rich table or plain print>`.
 - [ ] Commit: `feat(cli): typer skeleton with global flags + wiring + output`
 
 ### Task 6.2 — `cli/user_note.py` — `user note` subcommands
