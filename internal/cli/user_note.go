@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"uni-context/internal/app"
 	"uni-context/internal/domain"
 	"uni-context/internal/port"
 	"uni-context/internal/service"
@@ -31,6 +32,7 @@ var (
 	noteTagsFilter []string
 	noteLimit      int
 	noteFilePath   string
+	pdfEngine      string
 )
 
 // userNoteLoadAppFn is the indirection that lets RunE tests swap in a
@@ -47,7 +49,7 @@ var userNoteAddCmd = &cobra.Command{
 Content sources (mutually exclusive — pick one):
   positional arg    unictx user note add "hello world"
   -                 read from stdin (echo "hi" | unictx user note add -)
-  --file <path>     import from a .txt or .md file (max 10 MB)
+  --file <path>     import from a .txt, .md, or .pdf file (max 50 MB)
 
 When --file is used without --title, the title defaults to the file's
 basename with its extension stripped (weekly.md -> "weekly"). Markdown
@@ -60,6 +62,11 @@ files default to text/plain.`,
 		// "content required (positional arg or - for stdin)".
 		if cmd.Flags().Changed("file") && noteFilePath == "" {
 			return fmt.Errorf("--file: path cannot be empty")
+		}
+		// Engine validation runs before any IO so users get typo
+		// feedback instantly, without waiting for a file read or stat.
+		if pdfEngine != "" && pdfEngine != "gxpdf" && pdfEngine != "shell" && pdfEngine != "http" {
+			return fmt.Errorf("unknown pdf engine %q (want gxpdf|shell|http)", pdfEngine)
 		}
 
 		var content string
@@ -78,7 +85,7 @@ files default to text/plain.`,
 				return fmt.Errorf("read file: %w", err)
 			}
 			content = string(data)
-			mime = mimeForTextFile(noteFilePath)
+			mime = mimeForFile(noteFilePath)
 			if !cmd.Flags().Changed("title") {
 				noteTitle = deriveDefaultTitle(noteFilePath)
 			}
@@ -98,6 +105,27 @@ files default to text/plain.`,
 		}
 		defer a.Close()
 
+		// Engine override: when --engine is set OR the file is a PDF, build
+		// an extractor explicitly. The constructor default from app.Wire only
+		// fires for non-PDF-aware callers — the CLI always takes this path
+		// for PDFs so the choice is per-invocation, not per-process.
+		var createOpts []service.CreateOption
+		if pdfEngine != "" || mime == "application/pdf" {
+			engineName := pdfEngine
+			if engineName == "" {
+				engineName = cfg.PDF.Engine
+			}
+			if engineName == "" {
+				return fmt.Errorf(
+					"pdf extraction not configured: set pdf.engine in config or pass --engine")
+			}
+			ext, err := app.BuildExtractorForEngine(engineName, cfg.PDF, os.Stderr)
+			if err != nil {
+				return err
+			}
+			createOpts = append(createOpts, service.WithExtractor(ext))
+		}
+
 		id, err := a.Ingest.Create(cmd.Context(), service.Input{
 			Scope:       domain.ScopeUser,
 			Kind:        domain.KindNote,
@@ -108,7 +136,7 @@ files default to text/plain.`,
 			Tags:        noteTags,
 			MIME:        mime,
 			SourceMeta:  sourceMeta,
-		})
+		}, createOpts...)
 		if err != nil {
 			return err
 		}
@@ -228,7 +256,10 @@ var userNoteDeleteCmd = &cobra.Command{
 func init() {
 	userNoteAddCmd.Flags().StringVar(&noteTitle, "title", "", "note title")
 	userNoteAddCmd.Flags().StringSliceVar(&noteTags, "tag", nil, "tags (comma-separated or repeat)")
-	userNoteAddCmd.Flags().StringVar(&noteFilePath, "file", "", "import content from a file (text only)")
+	userNoteAddCmd.Flags().StringVar(&noteFilePath, "file", "", "import content from a file (.txt, .md, .pdf)")
+	userNoteAddCmd.Flags().StringVar(&pdfEngine, "engine", "",
+		`pdf extractor override: "gxpdf", "shell", or "http". `+
+			`Empty uses the config default (pdf.engine).`)
 	userNoteListCmd.Flags().StringSliceVar(&noteTagsFilter, "tag", nil, "filter by tag (OR semantics; comma-separated or repeat)")
 	userNoteListCmd.Flags().IntVar(&noteLimit, "limit", 20, "max items to return")
 
@@ -302,19 +333,23 @@ func previewRunes(s string, n int) string {
 	return string(runes[:n]) + "…"
 }
 
-// maxFileBytes is the file import size cap. Enforced via os.Stat before
-// os.ReadFile so a rejected file never allocates a buffer. 10 MB is a
-// guardrail against accidentally loading huge files, not a security boundary.
-const maxFileBytes int64 = 10 * 1024 * 1024
+// maxFileBytes is the file import size cap. Bumped from 10MB → 50MB
+// for PDF support (academic papers commonly 5-15MB, scanned textbooks
+// 20-80MB). Text files rarely approach this; cap exists as a guardrail
+// against accidentally loading huge files, not a security boundary.
+const maxFileBytes int64 = 50 * 1024 * 1024
 
-// mimeForTextFile maps a small set of text file extensions to MIME types.
-// Unknown extensions default to text/plain — binary support is out of scope.
-// Case-insensitive via strings.ToLower so weekly.MD is still markdown.
-// Adding new text types later (.org, .rst) is a one-liner here.
-func mimeForTextFile(path string) string {
+// mimeForFile returns the MIME type for a path based on extension.
+// Renamed from mimeForTextFile when PDF support was added (the old
+// name lied once it returned application/pdf). Unknown extensions
+// fall back to text/plain (backward compat for users who pass
+// weirdly-named text files).
+func mimeForFile(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown":
 		return "text/markdown"
+	case ".pdf":
+		return "application/pdf"
 	default:
 		return "text/plain"
 	}

@@ -91,22 +91,18 @@ func TestPreviewRunes(t *testing.T) {
 	}
 }
 
-func TestMimeForTextFile(t *testing.T) {
+func TestMimeForFile(t *testing.T) {
 	cases := []struct{ path, want string }{
-		{"notes.txt", "text/plain"},
-		{"weekly.md", "text/markdown"},
-		{"weekly.markdown", "text/markdown"},
-		{"weekly.MD", "text/markdown"}, // case-insensitive
-		{"weekly.Markdown", "text/markdown"},
-		{"notes.org", "text/plain"}, // unknown → default
-		{"noext", "text/plain"},     // no extension
-		{".bashrc", "text/plain"},   // leading-dot, no real ext
-		{"/abs/path/weekly.md", "text/markdown"},
+		{"foo.md", "text/markdown"},
+		{"foo.MARKDOWN", "text/markdown"}, // case-insensitive
+		{"foo.txt", "text/plain"},
+		{"foo.pdf", "application/pdf"},
+		{"foo.PDF", "application/pdf"},
+		{"foo.unknown", "text/plain"}, // backward compat fallback
+		{"noext", "text/plain"},
 	}
 	for _, c := range cases {
-		t.Run(c.path, func(t *testing.T) {
-			assert.Equal(t, c.want, mimeForTextFile(c.path))
-		})
+		assert.Equal(t, c.want, mimeForFile(c.path), "path=%s", c.path)
 	}
 }
 
@@ -151,6 +147,18 @@ func TestCheckFileSize(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckFileSize_AtCap and _OverCap hardcode the literal 50MB cap
+// (not the maxFileBytes constant) so they fail loudly if someone
+// accidentally bumps or lowers the cap without updating these guards.
+// The table-driven TestCheckFileSize above uses the constant and so
+// would silently follow any change — these two are the tripwire.
+func TestCheckFileSize_AtCap(t *testing.T) {
+	assert.NoError(t, checkFileSize(50*1024*1024))
+}
+func TestCheckFileSize_OverCap(t *testing.T) {
+	assert.Error(t, checkFileSize(50*1024*1024+1))
 }
 
 func TestValidateFileImport_NotExisting(t *testing.T) {
