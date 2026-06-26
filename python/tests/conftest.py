@@ -3,16 +3,12 @@
 Fixtures defined here are auto-available to every test under tests/.
 Phase-specific conftest.py files (e.g. tests/storage/conftest.py)
 live next to their tests and add fixtures only those tests need.
-
-The tmp_db fixture (in-memory SQLite via unictx.storage.db.open_db)
-is intentionally DEFERRED to Phase 2 Task 2.1 — storage.db doesn't
-exist yet, so the fixture has nothing to wrap. Phase 2 Task 2.1 will
-add tmp_db here (see task-1.6 brief note: "defer tmp_db fixture to
-Phase 2 Task 2.1"). Tests that today need a ContextRepo use the
-fake_repo fixture; tests that need real SQLite wait for Phase 2.
 """
 
 from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
 
 import pytest
 
@@ -37,3 +33,20 @@ def canned_fs() -> CannedFileStore:
 def fake_embedder() -> FakeEmbedder:
     """1024-dim deterministic embedder. Override .model_info to customize."""
     return FakeEmbedder(dimension=1024)
+
+
+@pytest.fixture
+def tmp_db() -> Iterator[sqlite3.Connection]:
+    """Fresh :memory: SQLite with sqlite-vec loaded; no migrations applied.
+
+    Storage tests that need schema call ``migrate(db)`` (Task 2.2) themselves,
+    or use a ``migrated_db`` fixture (added in Task 2.2 once migrate exists).
+
+    Uses ``:memory:`` rather than ``tmp_path`` — in-memory DBs don't need a
+    filesystem path, are faster, and are isolated per-test by construction.
+    """
+    from unictx.storage.db import open_db
+
+    db = open_db(":memory:")
+    yield db
+    db.close()
