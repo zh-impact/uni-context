@@ -75,7 +75,7 @@ python/
 │   │   └── rrf.py             # RRF formula helper (rank + 60)
 │   │
 │   ├── embed/                 # Embedder + model registry + workers
-│   │   ├── errors.py          # ModelNotFound, EmbeddingFailed, ModelConflict
+│   │   ├── errors.py          # ModelNotFound, ModelConflict, EmbeddingFailed, StatusNotFound
 │   │   ├── models.py          # ModelInfo, ModelSpec, EmbeddingStatus
 │   │   ├── embedder.py        # Protocol: Embedder
 │   │   ├── ollama.py          # Ollama HTTP embedder
@@ -365,14 +365,43 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
 - [ ] Pydantic v2 models mirroring Go's config schema:
   ```python
   from pathlib import Path
-  from pydantic import BaseModel, Field
+  from pydantic import BaseModel, Field, model_validator
+
+  class UserConfig(BaseModel):
+      """Owner identity for new items. Default 'default'."""
+      id: str = "default"
 
   class EmbedderConfig(BaseModel):
+      """Controls optional embedding pipeline.
+
+      When enabled=False (the default), the app behaves as Plan 1:
+      no vector indexing, search defaults to fts-only. When enabled=True,
+      apply_defaults() fills provider/base_url/model/dimension if empty
+      (mirrors Go config.go:101-123).
+      """
+      enabled: bool = False        # ← wire() branches on this
       provider: str = ""           # "", "ollama", "openai-compat"
       base_url: str = ""
-      model: str = "bge-m3"
-      dimension: int = 1024
+      model: str = ""
+      dimension: int = 0
       api_key: str = ""            # OpenAI hosted; local servers ignore
+
+      @model_validator(mode="after")
+      def apply_defaults(self):
+          if not self.enabled:
+              return self
+          if self.provider == "":
+              self.provider = "ollama"
+          if self.base_url == "":
+              self.base_url = {
+                  "ollama": "http://localhost:11434",
+                  "openai-compat": "http://localhost:1234/v1",
+              }.get(self.provider, "")
+          if self.model == "":
+              self.model = "bge-m3"
+          if self.dimension == 0:
+              self.dimension = 1024
+          return self
 
   class ShellPdfEngineConfig(BaseModel):
       command: str = "pdftotext - -"
@@ -398,6 +427,7 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
       engines: PdfEnginesConfig = Field(default_factory=PdfEnginesConfig)
 
   class Config(BaseModel):
+      user: UserConfig = Field(default_factory=UserConfig)
       data_dir: Path               # XDG default at load time
       embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
       pdf: PdfConfig = Field(default_factory=PdfConfig)
@@ -431,15 +461,18 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 - [ ] `storage/filestore.py` — `FileStore` Protocol (defined here because
   storage/ owns the impl too; see Module Structure note above)
 - [ ] `search/vectorstore.py` — `VectorStore` Protocol
-  (`put`, `delete`, `search`). **Owns the vec0 virtual table; this is
-  where vector writes live.**
+  (`put`, `delete`, `search`) + `VectorQuery` dataclass (vector, model_slug,
+  limit) + `VectorHit` dataclass (item_id, score). Mirrors Go's
+  `port/vectorstore.go`. **Owns the vec0 virtual table; this is where
+  vector writes live.**
 - [ ] `pdf/extractor.py` — `PDFExtractor` Protocol
 - [ ] All as `@runtime_checkable Protocol` with method signatures
   matching Go's `port/*.go`. Drop `ctx context.Context` params — sync
   Python doesn't need them.
 - [ ] Add module-specific error classes raised by these interfaces:
-  - `embed/errors.py`: `ModelNotFound`, `ModelConflict` (UNIQUE),
-    `EmbeddingFailed`
+  - `embed/errors.py`: `ModelNotFound`, `ModelConflict` (UNIQUE
+    violation on slug), `EmbeddingFailed`, `StatusNotFound` (raised
+    by `EmbeddingRepo.get_status` when no row matches)
   - `pdf/errors.py`: `PDFEncrypted`, `PDFExtractionFailed`,
     `PDFCommandNotFound`
   - `storage/filestore.py` raises `items/errors.py:ExternalizedContentMissing`
@@ -598,14 +631,29 @@ status-only** — it does NOT write vectors. Vector writes belong to
 `embedding_status` (regular table, UPSERT-able) vs `vec_<slug>_<dim>`
 (vec0 virtual table, DELETE+INSERT in tx).
 
-- [ ] `upsert_status(item_id, model_slug, status, err_str="")` —
-  `INSERT ... ON CONFLICT(item_id, model_slug) DO UPDATE SET
-  status=excluded.status, last_error=excluded.last_error,
-  attempts=attempts+1, updated_at=?`. Matches Go's `UpsertStatus`.
+- [ ] `upsert_status(item_id, model_slug, status, err_str="")` — SQL
+  matches Go's `upsertSQL` (embedding_repo.go:29-39) byte-for-byte:
+  ```sql
+  INSERT INTO context_embedding
+      (item_id, model_slug, embedded_at, status, error, last_error, attempts)
+  VALUES (?, ?, ?, ?, ?, ?, 1)
+  ON CONFLICT(item_id, model_slug) DO UPDATE SET
+      embedded_at = excluded.embedded_at,
+      status      = excluded.status,
+      error       = excluded.error,
+      last_error  = excluded.last_error,
+      attempts    = context_embedding.attempts + 1
+  ```
+  Notes: column is `embedded_at` (NOT `updated_at` — that doesn't exist
+  on this table). Both `error` (0002 original) and `last_error` (0003
+  addition) get bound to the same `err_str` for backward-compat — Go
+  mirrors the same pattern. `embedded_at` value is
+  `int(datetime.now(timezone.utc).timestamp())`.
 - [ ] `get_status(item_id, model_slug)` — single-row read; raises
   `embed/errors.py:StatusNotFound` if missing.
-- [ ] `list_failed(limit)` — `WHERE status='failed' ORDER BY updated_at
-  DESC LIMIT ?`. Used by Worker to retry.
+- [ ] `list_failed(limit)` — `WHERE status='failed' ORDER BY embedded_at
+  DESC LIMIT ?`. Used by Worker to retry. (Sort key is `embedded_at`,
+  not `updated_at` — `context_embedding` has no `updated_at` column.)
 - [ ] `list_for_item(item_id)` — all models' status rows for an item
   (drives `embed status` CLI command).
 - [ ] Cascade: when a `context_item` is deleted, FK ON DELETE CASCADE
@@ -763,12 +811,18 @@ Port `internal/service/ingest.go`:
 ### Task 5.3 — `embed/service.py` — EmbedService
 
 - [ ] `embed_item(item, model_slug)` — hydrate content if externalized
-  (mirror Go's `hydrateContent`), call embedder, put via EmbeddingRepo
-- [ ] Status row always written (success='done', failure='failed' with
-  last_error, attempts counter)
-- [ ] Tests: happy path; empty content; embedder failure; status row on
-  all paths
-- [ ] Commit: `feat(embed): EmbedService with status tracking`
+  (mirror Go's `hydrateContent`), call embedder, then split the write:
+  - **Vector → `VectorStore.put(item_id, model_slug, vector)`** (vec0
+    virtual table; Task 2.5)
+  - **Status → `EmbeddingRepo.upsert_status(item_id, model_slug, status,
+    err_str)`** (regular table; Task 2.6)
+- [ ] Status always written on every path (success → status='done',
+  failure → status='failed' + last_error + attempts++). Vector only
+  written on success.
+- [ ] Tests: happy path (vector + status both written); empty content
+  (skip embed, status='skipped'); embedder failure (status='failed',
+  no vector written); status row present on all paths
+- [ ] Commit: `feat(embed): EmbedService with split vector/status writes`
 
 ### Task 5.4 — `embed/worker.py` + `embed/backfill.py` + `embed/reembed.py`
 
