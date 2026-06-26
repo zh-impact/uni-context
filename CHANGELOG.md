@@ -413,3 +413,56 @@ markdown and a long text note) were reindexed on 2026-06-23 via
 embed path. Verified with 2 new sqlite tests (externalized→searchable +
 idempotency), 1 new service integration test (verified the test fails
 without the fix), and 4 new service tests for the bulk runner.
+
+## PDF Attach for `user note add` (2026-06-26)
+
+`unictx user note add --file paper.pdf` now extracts text and stores both
+the original PDF blob and the extracted text as a searchable, embeddable
+context item. The PDF is content-addressed in FileStore under
+`SourceMeta["original_uri"]`; the extracted text is stored as the item's
+`Content` (externalized via the existing 4KB threshold) so FTS, hybrid
+search, and embeddings all work without special-casing.
+
+**Engines** (`pdf.engine` in config):
+- `gxpdf` — pure-Go default (`github.com/coregx/gxpdf`), no external
+  dependencies. Handles text-layer PDFs; returns empty string for
+  image-only / scanned PDFs.
+- `shell` — subprocess (e.g. `pdftotext - -`); configured via
+  `pdf.engines.shell.command`. 30s default timeout.
+- `http` — POST binary to a service; configured via
+  `pdf.engines.http.url` (optional `auth_token`). 30s default timeout.
+
+Per-call override: `unictx user note add --file x.pdf --engine shell`.
+
+**Behavior:**
+- Encrypted PDFs surface a clear "encrypted pdf" error (no `--password`
+  flag yet — see spec "Future work").
+- Image-only / scanned PDFs (empty extraction) store the blob with
+  empty `Content` and a warning logged to stderr; embed is skipped to
+  avoid title-only vectors polluting the index.
+- File size cap bumped 10 MB → 50 MB for realistic PDF sizes (academic
+  papers 5-15 MB, scanned textbooks 20-80 MB).
+- `mimeForTextFile` renamed to `mimeForFile` (the old name lied once it
+  returned `application/pdf`). Unknown extensions still fall back to
+  `text/plain` for backward compat.
+
+**Rollback contract:** when `repo.Create` fails after the PDF branch ran,
+`IngestService.Create` deletes both the externalized text (`item.ContentURI`)
+and the PDF blob (`SourceMeta["original_uri"]`) from FileStore. Without
+this, the failure path would orphan refcount=1 entries.
+
+**Empty `pdf.engine` (the default) disables PDF support** —
+`user note add --file x.pdf` errors with a clear "pdf extraction not
+configured" until the user opts in.
+
+**Scope:** 8 tasks under `feat/pdf-attach`. Verified with 9 new adapter
+tests, 7 new ingest service tests, 3 new app wiring tests, and 3 new
+CLI integration tests; full suite green across 11 packages with
+`-tags sqlite_fts5`. See `docs/superpowers/plans/2026-06-26-pdf-attach.md`
+for the plan and `.superpowers/sdd/progress.md` for execution notes.
+
+**Out of scope (deferred to future work):**
+- `--password` for encrypted PDFs (gxpdf API surface needs evaluation)
+- `--pages 1-10` page-range selection
+- Other binary formats (docx, html)
+- `--no-size-limit` escape hatch
