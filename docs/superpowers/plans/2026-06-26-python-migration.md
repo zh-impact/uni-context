@@ -465,9 +465,15 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 - [ ] `storage/filestore.py` — `FileStore` Protocol (defined here because
   storage/ owns the impl too; see Module Structure note above)
 - [ ] `search/vectorstore.py` — `VectorStore` Protocol
-  (`put`, `delete`, `search`) + `VectorQuery` dataclass (vector, model_slug,
-  limit) + `VectorHit` dataclass (item_id, score). Mirrors Go's
-  `port/vectorstore.go`. **Owns the vec0 virtual table; this is where
+  (`put`, `delete`, `search`) + `VectorQuery` dataclass + `VectorHit`
+  dataclass. **Mirrors Go's `port/vectorstore.go` byte-for-byte —
+  Go's actual fields are the contract:** `VectorQuery` has
+  (vector, model, limit, scopes, kinds) — `scopes`/`kinds` are
+  pushdown filters for the sqlite impl's JOIN on context_item;
+  `VectorHit` has (id, score, distance) — RRF in `search/service.py`
+  needs the raw `distance` alongside the normalized `score`. Earlier
+  draft of this brief listed fewer fields; Go source governs per
+  Global Constraints. **Owns the vec0 virtual table; this is where
   vector writes live.**
 - [ ] `pdf/extractor.py` — `PDFExtractor` Protocol
 - [ ] All as `@runtime_checkable Protocol` with method signatures
