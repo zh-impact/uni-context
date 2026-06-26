@@ -63,7 +63,6 @@ func TestBuildExtractorForEngine_ShellAppliesTimeoutDefault(t *testing.T) {
 	// exists mainly to assert the constructor doesn't panic with a
 	// zero timeout. The ShellExtractor's own unit tests cover the
 	// 30s default semantics.
-	_ = time.Second // suppress unused if time only used in default
 }
 
 func TestBuildExtractorForEngine_ShellUsesConfiguredCommand(t *testing.T) {
