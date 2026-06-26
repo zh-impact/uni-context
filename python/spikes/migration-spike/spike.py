@@ -60,6 +60,7 @@ def decode_cursor(cursor: str) -> tuple[int, str]:
 
 # ---- sync sqlite3 ----
 
+
 def test_sync_sqlite_vec() -> None:
     print("\n[Risk 1a] sqlite-vec loads via sync sqlite3")
     db = sqlite3.connect(":memory:")
@@ -73,9 +74,7 @@ def test_sync_sqlite_vec() -> None:
 def test_sync_fts5_trigram() -> None:
     print("\n[Risk 2a] FTS5 trigram tokenizer works in sync sqlite3")
     db = sqlite3.connect(":memory:")
-    db.execute(
-        "CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')"
-    )
+    db.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')")
     db.execute("INSERT INTO t(x) VALUES ('hello world'), ('batchsize tuning')")
     n = db.execute("SELECT count(*) FROM t WHERE t MATCH 'batchsize'").fetchone()[0]
     assert n == 1, f"expected 1 match, got {n}"
@@ -84,6 +83,7 @@ def test_sync_fts5_trigram() -> None:
 
 
 # ---- aiosqlite ----
+
 
 async def test_aiosqlite_vec() -> None:
     print("\n[Risk 1b] sqlite-vec loads via aiosqlite")
@@ -105,6 +105,7 @@ async def test_aiosqlite_vec() -> None:
 
 # ---- real DB read ----
 
+
 def test_read_go_db_schema() -> None:
     print(f"\n[Risk 3] Reading existing Go DB at {DB_PATH}")
     if not DB_PATH.exists():
@@ -116,7 +117,8 @@ def test_read_go_db_schema() -> None:
     sqlite_vec.load(db)
 
     tables = [
-        r[0] for r in db.execute(
+        r[0]
+        for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
     ]
@@ -133,9 +135,7 @@ def test_read_go_db_schema() -> None:
     ).fetchone()[0]
     print(f"  ✓ {n_items} items, {n_externalized} externalized (>4KB → FileStore)")
 
-    n_models = db.execute(
-        "SELECT count(*) FROM embedding_model"
-    ).fetchone()[0]
+    n_models = db.execute("SELECT count(*) FROM embedding_model").fetchone()[0]
     print(f"  ✓ {n_models} embedding_model rows")
 
     # vec0 table queryable
