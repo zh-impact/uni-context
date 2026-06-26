@@ -69,7 +69,8 @@ python/
 │   │
 │   ├── search/                # FTS + hybrid + RRF
 │   │   ├── models.py          # SearchHit, SearchQuery, SearchMode
-│   │   ├── searcher.py        # Protocol: Searcher
+│   │   ├── searcher.py        # Protocol: Searcher (FTS+LIKE)
+│   │   ├── vectorstore.py     # Protocol: VectorStore (vec0 KNN)
 │   │   ├── service.py         # SearchService (RRF, per-leg timeout)
 │   │   └── rrf.py             # RRF formula helper (rank + 60)
 │   │
@@ -382,14 +383,19 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
       timeout_seconds: int = 30
       auth_token: str = ""
 
+  class PdfEnginesConfig(BaseModel):
+      """Mirrors Go's nested struct — one field per engine.
+
+      Using a heterogeneous dict[str, A | B] would let Pydantic silently
+      fall back between types on mismatch, hiding config errors. A flat
+      struct validates each sub-config precisely.
+      """
+      shell: ShellPdfEngineConfig = Field(default_factory=ShellPdfEngineConfig)
+      http: HttpPdfEngineConfig = Field(default_factory=HttpPdfEngineConfig)
+
   class PdfConfig(BaseModel):
       engine: str = ""             # "", "fitz", "shell", "http"
-      engines: dict[str, ShellPdfEngineConfig | HttpPdfEngineConfig] = Field(
-          default_factory=lambda: {
-              "shell": ShellPdfEngineConfig(),
-              "http": HttpPdfEngineConfig(),
-          }
-      )
+      engines: PdfEnginesConfig = Field(default_factory=PdfEnginesConfig)
 
   class Config(BaseModel):
       data_dir: Path               # XDG default at load time
@@ -417,12 +423,16 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 - [ ] `search/searcher.py` — `Searcher` Protocol + `SearchHit`,
   `SearchQuery`, `SearchMode` dataclasses/enums
 - [ ] `embed/embedder.py` — `Embedder` Protocol + `ModelInfo` dataclass
-- [ ] `embed/embedding_repo.py` — `EmbeddingRepo` Protocol +
-  `EmbeddingStatus` dataclass
+- [ ] `embed/embedding_repo.py` — `EmbeddingRepo` Protocol
+  (`upsert_status`, `get_status`, `list_failed`, `list_for_item`) +
+  `EmbeddingStatus` dataclass. **Status-only — no vector methods.**
 - [ ] `embed/model_registry.py` — `ModelRegistry` Protocol + `ModelSpec`
   dataclass
 - [ ] `storage/filestore.py` — `FileStore` Protocol (defined here because
   storage/ owns the impl too; see Module Structure note above)
+- [ ] `search/vectorstore.py` — `VectorStore` Protocol
+  (`put`, `delete`, `search`). **Owns the vec0 virtual table; this is
+  where vector writes live.**
 - [ ] `pdf/extractor.py` — `PDFExtractor` Protocol
 - [ ] All as `@runtime_checkable Protocol` with method signatures
   matching Go's `port/*.go`. Drop `ctx context.Context` params — sync
@@ -561,23 +571,51 @@ Port `internal/adapter/sqlite/searcher.go`:
 
 ### Task 2.5 — `storage/vectorstore_impl.py`
 
+Port `internal/adapter/sqlite/vectorstore.go`. Owns the **vec0 virtual
+table** (one per model slug + dimension: `vec_<slug>_<dim>`). This is
+where vector writes live — distinct from EmbeddingRepo (Task 2.6,
+status-only).
+
+- [ ] `put(item_id, model_slug, vector)` — DELETE+INSERT in a single
+  transaction (vec0 doesn't support INSERT OR REPLACE; this is the
+  UPSERT idiom for virtual tables). Mirrors Go's `VectorStore.Put`.
+- [ ] `delete(item_id, model_slug)` — used when an item is removed or
+  a model is unregistered.
 - [ ] `search(vector, model_slug, limit)` — JOIN vec0 virtual table
   with context_item, KNN match
 - [ ] K=200 internal cap (matches Go)
-- [ ] Same clamp_limit semantics
-- [ ] Tests: KNN finds embedded items; dimension mismatch handled;
-  limit clamp
+- [ ] Same clamp_limit semantics as Searcher
+- [ ] Tests: put/search roundtrip; put twice on same key replaces
+  cleanly (no duplicate); delete removes; KNN finds embedded items;
+  dimension mismatch handled; limit clamp
 - [ ] Commit: `feat(storage): VectorStore impl using sqlite-vec`
 
 ### Task 2.6 — `storage/embedding_repo_impl.py`
 
-- [ ] `put(item_id, model_slug, vector, status)` — UPSERT (DELETE+INSERT
-  in tx, matching Go's approach since vec0 doesn't support INSERT OR REPLACE)
-- [ ] `get(item_id, model_slug)`
-- [ ] `list_for_item(item_id)` — all models' status
-- [ ] `delete(item_id, model_slug)`
-- [ ] Tests: put/get roundtrip; status transitions; cascade on item delete
-- [ ] Commit: `feat(storage): EmbeddingRepo impl with UPSERT semantics`
+Port `internal/adapter/sqlite/embedding_repo.go`. **EmbeddingRepo is
+status-only** — it does NOT write vectors. Vector writes belong to
+`VectorStore.Put` (Task 2.5). The two tables are separate:
+`embedding_status` (regular table, UPSERT-able) vs `vec_<slug>_<dim>`
+(vec0 virtual table, DELETE+INSERT in tx).
+
+- [ ] `upsert_status(item_id, model_slug, status, err_str="")` —
+  `INSERT ... ON CONFLICT(item_id, model_slug) DO UPDATE SET
+  status=excluded.status, last_error=excluded.last_error,
+  attempts=attempts+1, updated_at=?`. Matches Go's `UpsertStatus`.
+- [ ] `get_status(item_id, model_slug)` — single-row read; raises
+  `embed/errors.py:StatusNotFound` if missing.
+- [ ] `list_failed(limit)` — `WHERE status='failed' ORDER BY updated_at
+  DESC LIMIT ?`. Used by Worker to retry.
+- [ ] `list_for_item(item_id)` — all models' status rows for an item
+  (drives `embed status` CLI command).
+- [ ] Cascade: when a `context_item` is deleted, FK ON DELETE CASCADE
+  (migration 0002/0004) removes the status row automatically — verify
+  in test, don't write a manual cascade.
+- [ ] Tests: upsert creates row; upsert same key again increments
+  `attempts` and overwrites status/last_error; get_status happy + not
+  found; list_failed ordering; list_for_item returns all models;
+  cascade-on-item-delete.
+- [ ] Commit: `feat(storage): EmbeddingRepo status-row impl (no vectors)`
 
 ### Task 2.7 — `storage/model_registry_impl.py` + `storage/schema_meta.py`
 
@@ -699,14 +737,28 @@ Port `internal/service/ingest.go`:
 
 - [ ] Constructor: `SearchService(searcher, repo, embedder=None, log=...)`
 - [ ] `search(request) -> response` — mode: fts-only | hybrid
-- [ ] **Per-leg timeout (§3.7):** vector leg with `concurrent.futures`
-  timeout; on failure/timeout, fall back to fts-only with warning
+- [ ] **Hybrid mode execution order (§3.7 clarification):**
+  1. Call `embedder.Embed([query])` to get the query vector. This is
+     the only HTTP call in the path — wrap with `concurrent.futures`
+     (`ThreadPoolExecutor(max_workers=1)` + `future.result(timeout=N)`)
+     OR rely on `httpx.Client(timeout=...)` set in the embedder itself
+     (preferred — fewer moving parts). On timeout/error: fall back to
+     fts-only with warning.
+  2. Once query vector is in hand, both SQLite queries (FTS via
+     `Searcher.search_fts` and KNN via `VectorStore.search`) are
+     local + fast (<100ms typical). **No timeout wrapper needed**
+     — they share a connection and run sequentially, not concurrently.
+  3. RRF-merge the two result lists.
+- [ ] **Per-leg timeout (§3.7):** applies to the embedder.Embed call
+  in step 1 only. NOT to SQLite queries.
 - [ ] **RRF formula (§3.8):** `Σ 1/(rank + 60)`, rank is post-filter
 - [ ] **Over-fetch (§3.9):** 3× user limit on both legs; clamp to 200
 - [ ] RRF tiebreak prefers newer items on score tie
-- [ ] Tests: fts-only basic; hybrid basic; vector failure degrades to fts;
-  fts failure continues with vector; per-leg timeout; ranking; tiebreak
-- [ ] Commit: `feat(search): SearchService with RRF + per-leg timeout`
+- [ ] Tests: fts-only basic; hybrid basic; embedder timeout degrades
+  to fts-only; embedder error degrades to fts-only; SQLite error in
+  one leg returns the other leg's results with warning; ranking;
+  tiebreak (newer wins on score tie)
+- [ ] Commit: `feat(search): SearchService with RRF + embedder-only timeout`
 
 ### Task 5.3 — `embed/service.py` — EmbedService
 
@@ -859,7 +911,7 @@ Revisit at end of each phase.
 
 | Risk | Mitigation |
 |------|------------|
-| sqlite-vec + aiosqlite extension loading fragility | Already spike-validated (sync + async both work) |
+| sqlite-vec extension loading on sync sqlite3 | Already spike-validated (sync path verified). Async (aiosqlite) is fallback-only; not in critical path per sync-first binding |
 | FTS5 malformed bug recurs in Python | Use fixed SQL from day 1 (Go archive §3.2); regression test in Task 2.4 |
 | Cursor format incompatibility breaks pagination | Spike-validated byte-identical round-trip |
 | PyMuPDF wheel availability on user's platform | PyMuPDF has broad wheel coverage; verify on first install |
@@ -876,9 +928,16 @@ Revisit at end of each phase.
 
 Explicitly NOT in this migration:
 
+- **`ProjectRepo`.** Go has `port.ProjectRepo` + `sqlite/project_repo.go`,
+  but they're **dead infrastructure** — wired in `app.go` (lines 32, 99)
+  but no CLI command or service consumes them. `ContextItem.ProjectID`
+  remains as a field (FK to `projects` table created by migration 0001),
+  but Python does NOT port the repo or add a CLI for it. If project
+  management is needed later, it's a separate plan.
 - New features (agent framework, web UI, etc.) — those are separate
   plans once Python is primary.
-- Schema redesign. The schema is identical.
+- Schema redesign. The schema is identical (including the unused
+  `projects` table, for byte-level migration compatibility).
 - Migration of git history (the Go code stays in git as historical
   reference).
 - Performance optimization beyond "not worse than Go".

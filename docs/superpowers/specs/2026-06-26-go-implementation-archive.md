@@ -524,7 +524,9 @@ These are language-level traps, not architectural ones.
 
 1. **aiosqlite runs SQLite in a worker thread.** Extension loading must
    happen on that thread. Use `await db.load_extension(...)` after
-   `await db.enable_load_extension(True)`. Spike validates this works.
+   `await db.enable_load_extension(True)`. **Note:** sync-first plan
+   means `sqlite3` stdlib is the default; aiosqlite is fallback-only.
+   Spike validated both, but only sync is in the critical path.
 2. **`sqlite3.connect()` defaults to deferred FK enforcement.** Open
    with `sqlite3.connect(path, isolation_level=None)` for autocommit
    mode, OR explicitly `PRAGMA foreign_keys = ON`. Go uses
