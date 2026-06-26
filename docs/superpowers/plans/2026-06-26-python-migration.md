@@ -15,8 +15,8 @@ feature-organized modules (`items/`, `search/`, `embed/`, `pdf/`,
 layering — that was over-engineered for a single-user SQLite-bound tool.
 
 **Tech Stack:** Python 3.14, `sqlite3` (stdlib) + `sqlite-vec` (PyPI),
-`httpx` (sync + async), `typer`, `pyyaml`, `pymupdf` (default PDF engine),
-`pytest` + `pytest-asyncio`.
+`httpx` (sync + async), `typer`, `pydantic` v2 (config validation),
+`pyyaml`, `pymupdf` (default PDF engine), `pytest` + `pytest-asyncio`.
 
 **Reference docs:**
 - Spike: `python/spikes/migration-spike/spike.py` — 6/6 risks validated
@@ -53,12 +53,14 @@ reviewer can check the Go archive spec to verify faithfulness.
 
 ```
 python/
-├── pyproject.toml
+├── pyproject.toml             # ruff config lives here too ([tool.ruff] §)
 ├── src/unictx/
-│   ├── __init__.py
-│   ├── config.py              # Config schema + YAML loader (was: config/)
+│   ├── __init__.py            # EMPTY — no re-export (see Conventions)
+│   ├── errors.py              # UnictxError base only; specifics live in modules
+│   ├── config.py              # Pydantic Config schema + YAML loader
 │   │
 │   ├── items/                 # ContextItem + Ingest + query-side Item svc
+│   │   ├── errors.py          # ItemNotFound, ExternalizedContentMissing
 │   │   ├── models.py          # ContextItem, Project, Scope/Kind/Source enums
 │   │   ├── repo.py            # Protocol: ContextRepo (consumer-defined)
 │   │   ├── ingest.py          # IngestService (CRITICAL — most invariants)
@@ -72,6 +74,7 @@ python/
 │   │   └── rrf.py             # RRF formula helper (rank + 60)
 │   │
 │   ├── embed/                 # Embedder + model registry + workers
+│   │   ├── errors.py          # ModelNotFound, EmbeddingFailed, ModelConflict
 │   │   ├── models.py          # ModelInfo, ModelSpec, EmbeddingStatus
 │   │   ├── embedder.py        # Protocol: Embedder
 │   │   ├── ollama.py          # Ollama HTTP embedder
@@ -86,6 +89,7 @@ python/
 │   │   └── diagnostic.py      # DiagnosticService (schema + ping)
 │   │
 │   ├── pdf/                   # PDF extractor engines + factory
+│   │   ├── errors.py          # PDFEncrypted, PDFExtractionFailed
 │   │   ├── extractor.py       # Protocol: PDFExtractor
 │   │   ├── fitz_engine.py     # PyMuPDF (default)
 │   │   ├── shell_engine.py    # subprocess wrapper
@@ -101,6 +105,7 @@ python/
 │   │   ├── vectorstore_impl.py # VectorStore impl (vec0 KNN)
 │   │   ├── embedding_repo_impl.py
 │   │   ├── model_registry_impl.py
+│   │   ├── row_factory.py     # scan_item(cursor, row) — registered as db.row_factory
 │   │   ├── schema_meta.py     # SchemaMeta (for DiagnosticService)
 │   │   └── filestore.py       # sha256 content-addressed, refcounted
 │   │
@@ -110,9 +115,16 @@ python/
 │       ├── search.py          # search <query>
 │       ├── embed_cmd.py       # embed model/worker/backfill/reembed/status
 │       ├── doctor.py          # doctor
-│       └── reindex_fts_cmd.py # reindex-fts
+│       ├── reindex_fts_cmd.py # reindex-fts
+│       └── output.py          # format_result(result, json_mode) shared helper
 │
-└── tests/                     # mirrors src/unictx/ structure
+└── tests/
+    ├── conftest.py            # @pytest.fixture wrappers around _fakes/
+    ├── _fakes/                # Pure stub classes, importable across test modules
+    │   ├── __init__.py
+    │   ├── fake_repo.py       # FakeContextRepo (in-memory)
+    │   ├── canned_filestore.py
+    │   └── fake_embedder.py
     ├── items/
     ├── search/
     ├── embed/
@@ -132,6 +144,40 @@ idiom — dependencies point at the consumer, not a shared `port/` package.
 `items/models.py`, `search/models.py`, etc. — never at `storage/`
 internals. This keeps the SQL substrate swappable in a way the hexagonal
 layout didn't.
+
+## Python Conventions (Locked)
+
+These are project-wide code conventions. Every task inherits them.
+
+- **`__init__.py` files stay empty.** No `from .models import *` or
+  re-exports. Import paths are always explicit
+  (`from unictx.items.models import ContextItem`). Rationale: modular
+  monolith's main benefit is greppable, self-documenting imports.
+  Re-exports make import paths ambiguous.
+- **Domain models use `@dataclass(slots=True)`.** Memory-efficient for
+  25-field ContextItem. NOT frozen (version increment, status updates
+  mutate fields).
+- **Config uses Pydantic v2 `BaseModel`.** Nested config (embedder.*,
+  pdf.engines.shell.*, pdf.engines.http.*) gets free validation + type
+  coercion. Domain models stay plain dataclass — only Config is Pydantic.
+- **Timestamps written to DB are `int(datetime.now(timezone.utc).timestamp())`.**
+  Matches Go's `time.Now().Unix()` byte-for-byte. No naive `datetime.now()`.
+- **Exception hierarchy: hybrid.** `unictx/errors.py` defines only
+  `UnictxError(Exception)`. Each module owns its specific exceptions
+  (`items/errors.py:ItemNotFound`, `embed/errors.py:ModelNotFound`,
+  `pdf/errors.py:PDFEncrypted`). All inherit from `UnictxError` so CLI
+  can `except UnictxError` as a catch-all. sqlite3 UNIQUE violations
+  are caught in storage/ and re-raised as the appropriate ConflictError.
+- **SQLite row mapping: custom `scan_item` factory.** Register via
+  `db.row_factory = scan_item` in `storage/db.py`. Returns `ContextItem`
+  directly. Replaces Go's per-method `scan_item` helper; keeps query
+  code SQL-focused.
+- **CLI JSON output: shared `cli/output.py:format_result(result, json_mode)`.**
+  Every `--json` flag routes through this helper. No per-command
+  `json.dumps` calls. Non-JSON path uses rich tables.
+- **Import restrictions enforced by ruff.** `cli/*` CANNOT import
+  `storage/*_impl.py` directly (must go through services). Configured
+  via `[tool.ruff.lint.per-file-ignores]` or `import-restrictions` rule.
 
 ## Binding Decisions (Locked, Not Re-Litigated)
 
@@ -156,6 +202,11 @@ one, escalate to a plan revision before proceeding.
   See Go commit `706de09` and Go archive §3.2.
 - **Modular monolith, not hexagonal.** Module-per-feature as shown above.
   No `domain/port/adapter/service/cli/app/config` layering.
+- **Pydantic v2 for Config only.** Domain models (ContextItem, etc.) stay
+  `@dataclass(slots=True)`. Pydantic is pulled in for Config schema
+  validation only — not as a global ORM layer.
+- **Hybrid exception hierarchy.** Shared `UnictxError` base in
+  `errors.py`; specifics per-module. See Python Conventions §.
 
 ## Global Constraints
 
@@ -176,7 +227,12 @@ These bind every task. Don't restate them in task briefs.
 - Cross-module imports allowed: `from unictx.items.models import ...`,
   `from unictx.storage.repo_impl import ...`. Forbidden: CLI importing
   `storage/` internals directly — must go through services (matches Go's
-  post-cleanup rule that landed in commit `4cfc701`).
+  post-cleanup rule that landed in commit `4cfc701`). Enforced by
+  ruff config + guard test (see Task 1.1).
+- All Python Conventions (§) bind every task: empty `__init__.py`,
+  `slots=True` dataclasses, Pydantic for Config, UTC timestamps,
+  hybrid exception hierarchy, `scan_item` row factory, shared output
+  formatter, ruff import-restrictions.
 
 ## DB Sharing Strategy
 
@@ -194,12 +250,12 @@ and declare Python primary. Go binary is archived.
 
 | Phase | Scope | Est. Days | Cumulative |
 |-------|-------|-----------|------------|
-| 1 | Scaffolding + module skeleton + domain models + Protocols | 1.5 | 1.5 |
-| 2 | `storage/` module (db, migrations, all *_impl.py) | 5 | 6.5 |
-| 3 | `storage/filestore.py` + `embed/` HTTP embedders | 1.5 | 8 |
-| 4 | `pdf/` module (fitz + shell + http engines + factory) | 2 | 10 |
-| 5 | Services across modules (Ingest, Search, Embed, etc.) | 4 | 14 |
-| 6 | `cli/` module (typer commands + wiring) | 2 | 16 |
+| 1 | Scaffolding + module skeleton + errors + Config + models + Protocols + fixtures | 2.5 | 2.5 |
+| 2 | `storage/` module (db, migrations, all *_impl.py) | 4.5 | 7 |
+| 3 | `storage/filestore.py` + `embed/` HTTP embedders | 1.5 | 8.5 |
+| 4 | `pdf/` module (fitz + shell + http engines + factory) | 2 | 10.5 |
+| 5 | Services across modules (Ingest, Search, Embed, etc.) | 3.5 | 14 |
+| 6 | `cli/` module (typer commands + wiring + output) | 2 | 16 |
 | 7 | Test backfill (port all Go tests; ~50 cases) | 5 | 21 |
 | 8 | Feature-parity verification + cutover | 1 | 22 |
 
@@ -209,45 +265,150 @@ debugging time.
 
 ---
 
-## Phase 1 — Scaffolding + Domain Models + Protocols
+## Phase 1 — Scaffolding + Domain Models + Errors + Config + Protocols + Fixtures
 
-**Goal:** skeleton repo, types, interfaces. Module boundaries visible.
+**Goal:** skeleton repo, types, interfaces, error base, config loader,
+shared test fixtures. Every later phase depends on this.
 
-### Task 1.1 — uv project + module skeleton
+### Task 1.1 — uv project + module skeleton + ruff config
 
 - [ ] `cd python && uv init --python 3.14 --package unictx`
   (creates `python/src/unictx/` layout)
-- [ ] `uv add sqlite-vec httpx typer pyyaml pymupdf`
+- [ ] `uv add sqlite-vec httpx typer pydantic pyyaml pymupdf`
 - [ ] `uv add --dev pytest pytest-asyncio ruff`
-- [ ] Create empty package skeleton:
+- [ ] Create empty package skeleton (all `__init__.py` files empty —
+  see Python Conventions §):
   - `python/src/unictx/{items,search,embed,pdf,storage,cli}/__init__.py`
   - `python/src/unictx/__init__.py`
   - `python/tests/{items,search,embed,pdf,storage,cli}/__init__.py`
   - `python/tests/__init__.py`
-- [ ] Verify `uv run python -c "import sqlite_vec, httpx, typer, yaml, fitz; print('ok')"`
+  - `python/tests/_fakes/__init__.py`
+- [ ] Verify `uv run python -c "import sqlite_vec, httpx, typer, pydantic, yaml, fitz; print('ok')"`
 - [ ] Verify `uv run pytest` collects zero tests cleanly
-- [ ] Commit: `feat: init python project with module skeleton + deps`
+- [ ] Add `[tool.ruff]` config to `pyproject.toml`:
+  ```toml
+  [tool.ruff]
+  line-length = 100
+  target-version = "py314"
 
-### Task 1.2 — `items/models.py` — domain types
+  [tool.ruff.lint]
+  select = ["E", "W", "F", "I", "UP", "B", "SIM", "PT"]
+
+  [tool.ruff.lint.isort]
+  known-first-party = ["unictx"]
+
+  [tool.ruff.lint.per-file-ignores]
+  # CLI must NOT import storage impls directly — go through services
+  "src/unictx/cli/*" = ["PT"]
+  # Use TID252 (banned-api) once stable; for now document the rule in
+  # reviews and rely on the test in tests/cli/test_no_direct_storage_import.py
+  ```
+- [ ] Add a guard test `tests/cli/test_no_direct_storage_import.py` that
+  greps `cli/*.py` for `from unictx.storage.*_impl` and fails if found.
+- [ ] Commit: `feat: init python project with module skeleton + ruff config`
+
+### Task 1.2 — `unictx/errors.py` — shared exception base
+
+- [ ] `errors.py` with single class:
+  ```python
+  class UnictxError(Exception):
+      """Base for all uni-context domain errors.
+
+      Specific errors live in their owning module:
+      items/errors.py:ItemNotFound, embed/errors.py:ModelNotFound, etc.
+      Catch UnictxError in CLI for unified error reporting.
+      """
+  ```
+- [ ] No specifics here — they belong to the module that raises them.
+- [ ] Test: trivial `isinstance(SomeModuleError(), UnictxError)` smoke
+  test (added in 1.3/1.4 when specifics exist).
+- [ ] Commit: `feat(errors): add UnictxError base class`
+
+### Task 1.3 — `items/models.py` + `items/errors.py` — domain types
 
 Port `internal/domain/context.go` and `internal/domain/project.go`:
-- [ ] `ContextItem` dataclass with all fields (id, scope, kind, source,
-  owner_user_id, title, summary, content, content_uri, content_mime,
-  tags, source_meta, word_count, created_at, updated_at, version, ...)
+- [ ] `ContextItem` as `@dataclass(slots=True)` with all fields (id,
+  scope, kind, source, owner_user_id, title, summary, content,
+  content_uri, content_mime, tags, source_meta, word_count, created_at,
+  updated_at, version, ...)
 - [ ] `Scope`, `Kind`, `Source` as `StrEnum` (Python 3.11+; matches Go's
   string-backed enums)
-- [ ] `Project` dataclass
+- [ ] `Project` dataclass (also `slots=True`)
 - [ ] `NewItemParams` + `NewContextItem` factory with
   `validateCombination` logic
 - [ ] `ContentInlineLimit = 4 * 1024` constant
 - [ ] `countWords` function (port Go's implementation; note Minor: Go's
   undercounts CJK — preserve for parity, don't "fix" without a separate
   discussion)
-- [ ] Unit tests for `validateCombination` + `NewContextItem` in
-  `tests/items/test_models.py`
-- [ ] Commit: `feat(items): port ContextItem + Project + enums`
+- [ ] `items/errors.py`:
+  ```python
+  from unictx.errors import UnictxError
 
-### Task 1.3 — Distributed Protocols across modules
+  class ItemNotFound(UnictxError):
+      def __init__(self, item_id: str):
+          super().__init__(f"item not found: {item_id}")
+          self.item_id = item_id
+
+  class ExternalizedContentMissing(UnictxError):
+      """content_uri set but FileStore has no blob."""
+      def __init__(self, uri: str):
+          super().__init__(f"externalized content missing: {uri}")
+          self.uri = uri
+  ```
+- [ ] Unit tests for `validateCombination` + `NewContextItem` + error
+  subclasses in `tests/items/test_models.py` + `tests/items/test_errors.py`
+- [ ] Commit: `feat(items): port ContextItem + Project + enums + errors`
+
+### Task 1.4 — `config.py` — Pydantic Config + YAML loader + XDG
+
+- [ ] Pydantic v2 models mirroring Go's config schema:
+  ```python
+  from pathlib import Path
+  from pydantic import BaseModel, Field
+
+  class EmbedderConfig(BaseModel):
+      provider: str = ""           # "", "ollama", "openai-compat"
+      base_url: str = ""
+      model: str = "bge-m3"
+      dimension: int = 1024
+      api_key: str = ""            # OpenAI hosted; local servers ignore
+
+  class ShellPdfEngineConfig(BaseModel):
+      command: str = "pdftotext - -"
+      timeout_seconds: int = 30
+
+  class HttpPdfEngineConfig(BaseModel):
+      url: str = "http://localhost:8000/extract"
+      timeout_seconds: int = 30
+      auth_token: str = ""
+
+  class PdfConfig(BaseModel):
+      engine: str = ""             # "", "fitz", "shell", "http"
+      engines: dict[str, ShellPdfEngineConfig | HttpPdfEngineConfig] = Field(
+          default_factory=lambda: {
+              "shell": ShellPdfEngineConfig(),
+              "http": HttpPdfEngineConfig(),
+          }
+      )
+
+  class Config(BaseModel):
+      data_dir: Path               # XDG default at load time
+      embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+      pdf: PdfConfig = Field(default_factory=PdfConfig)
+  ```
+- [ ] `load(path: Path | None) -> Config`:
+  - Resolve path via XDG (`$XDG_CONFIG_HOME/unictx/config.yaml` →
+    `~/.config/unictx/config.yaml`). Same logic as Go.
+  - If file missing, return `Config(data_dir=xdg_data_home()/"unictx")`.
+  - If present, `yaml.safe_load` + `Config.model_validate(data)`.
+  - Pydantic raises `ValidationError` on bad shape — surface cleanly.
+- [ ] `xdg_data_home()` + `xdg_config_home()` helpers (was Go's config
+  defaults).
+- [ ] Tests: missing file → defaults; minimal YAML; full YAML; invalid
+  field → ValidationError; XDG env var honored.
+- [ ] Commit: `feat(config): Pydantic Config schema + YAML loader`
+
+### Task 1.5 — Distributed Protocols across modules
 
 Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 
@@ -255,7 +416,6 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
   delete/reindex_fts) + `ItemFilter` dataclass
 - [ ] `search/searcher.py` — `Searcher` Protocol + `SearchHit`,
   `SearchQuery`, `SearchMode` dataclasses/enums
-- [ ] `search/service.py` — placeholder import target (impl in Phase 5)
 - [ ] `embed/embedder.py` — `Embedder` Protocol + `ModelInfo` dataclass
 - [ ] `embed/embedding_repo.py` — `EmbeddingRepo` Protocol +
   `EmbeddingStatus` dataclass
@@ -266,10 +426,62 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 - [ ] `pdf/extractor.py` — `PDFExtractor` Protocol
 - [ ] All as `@runtime_checkable Protocol` with method signatures
   matching Go's `port/*.go`. Drop `ctx context.Context` params — sync
-  Python doesn't need them. (Async services would use `asyncio.CancelledError`.)
+  Python doesn't need them.
+- [ ] Add module-specific error classes raised by these interfaces:
+  - `embed/errors.py`: `ModelNotFound`, `ModelConflict` (UNIQUE),
+    `EmbeddingFailed`
+  - `pdf/errors.py`: `PDFEncrypted`, `PDFExtractionFailed`,
+    `PDFCommandNotFound`
+  - `storage/filestore.py` raises `items/errors.py:ExternalizedContentMissing`
 - [ ] Tests: structural-typing smoke tests (a stub class satisfies each
   Protocol via `isinstance` check with `@runtime_checkable`).
-- [ ] Commit: `feat: define Protocol interfaces across modules`
+- [ ] Commit: `feat: define Protocol interfaces + module errors`
+
+### Task 1.6 — `tests/conftest.py` + `tests/_fakes/` — shared fixtures
+
+Stubs are load-bearing across ~30 service-layer tests (Phase 5) and
+~20 storage tests (Phase 2-3). Build them now or every Phase 2-6 test
+re-invents them.
+
+- [ ] `tests/_fakes/fake_repo.py` — `FakeContextRepo` in-memory impl of
+  `items/repo.py:ContextRepo`. Port Go's `fake_repo_test.go` semantics
+  (dict-backed, supports reindex_fts call recording).
+- [ ] `tests/_fakes/canned_filestore.py` — `CannedFileStore` impl of
+  `FileStore`. Constructor takes `dict[sha256, bytes]`; raises on
+  unknown URI. Records `delete` calls for rollback verification.
+- [ ] `tests/_fakes/fake_embedder.py` — `FakeEmbedder` impl of
+  `embed/embedder.py:Embedder`. Configurable vectors + `error_embedder`
+  variant for failure tests.
+- [ ] `tests/conftest.py`:
+  ```python
+  import pytest
+  from tests._fakes.fake_repo import FakeContextRepo
+  from tests._fakes.canned_filestore import CannedFileStore
+  from tests._fakes.fake_embedder import FakeEmbedder
+
+  @pytest.fixture
+  def fake_repo():
+      return FakeContextRepo()
+
+  @pytest.fixture
+  def canned_fs():
+      return CannedFileStore({})
+
+  @pytest.fixture
+  def fake_embedder():
+      return FakeEmbedder(dimension=1024)
+
+  @pytest.fixture
+  def tmp_db(tmp_path):
+      """Fresh :memory:-backed SQLite for storage tests."""
+      from unictx.storage.db import open_db
+      db = open_db(":memory:")
+      yield db
+      db.close()
+  ```
+- [ ] Tests: each fake has a smoke test verifying it satisfies its
+  Protocol (`isinstance(fake, SomeProtocol)`).
+- [ ] Commit: `feat(test): shared fixtures + fake stubs`
 
 ---
 
@@ -318,7 +530,11 @@ Port `internal/adapter/sqlite/repo.go`:
   context_fts, bypassing the trigger pair
 - [ ] `encode_cursor(ts, id)` / `decode_cursor(c)` — base36, byte-identical
   to Go's `strconv.FormatInt(ts, 36)`. Spike has the verified impl.
-- [ ] `scan_item` helper — JSON decode tags + source_meta, handle NULL
+- [ ] `storage/row_factory.py:scan_item(cursor, row)` — JSON decode tags
+  + source_meta, handle NULL. Registered globally as `db.row_factory`
+  in `storage/db.py` so every SELECT returns `ContextItem` directly.
+- [ ] Raise `items/errors.py:ItemNotFound` (not bare `KeyError`) when
+  `get()` finds no row.
 - [ ] Tests: roundtrip create/get/update/delete; list pagination;
   reindex_fts for externalized; cursor format cross-checked with Go
 - [ ] Commit: `feat(storage): ContextRepo impl with base36 cursor + reindex_fts`
@@ -535,7 +751,7 @@ Port `internal/service/ingest.go`:
 
 ## Phase 6 — `cli/` Module
 
-### Task 6.1 — Typer app skeleton + global flags + wiring
+### Task 6.1 — Typer app skeleton + global flags + wiring + output helper
 
 - [ ] `cli/app.py` — main `typer.Typer()`
 - [ ] Global flags: `--config`, `--json`, `--verbose`
@@ -543,7 +759,11 @@ Port `internal/service/ingest.go`:
 - [ ] App wiring: `wire(cfg)` returns a container with all services
   (the only place that imports `storage/*_impl.py` directly — everything
   else goes through service Protocols)
-- [ ] Commit: `feat(cli): typer skeleton with global flags + wiring`
+- [ ] `cli/output.py:format_result(result, json_mode)` — shared output
+  helper. When `json_mode=True`, `json.dumps(result, default=pydantic_serializer,
+  indent=2)`. Otherwise, render via `rich` table or plain print. Used by
+  every subcommand's `--json` path.
+- [ ] Commit: `feat(cli): typer skeleton with global flags + wiring + output`
 
 ### Task 6.2 — `cli/user_note.py` — `user note` subcommands
 
@@ -587,11 +807,10 @@ Port `internal/service/ingest.go`:
 ## Phase 7 — Test Backfill (the long tail)
 
 Port remaining Go tests not yet ported in earlier phases. Estimated
-~50 test cases across all modules.
+~50 test cases across all modules. Stubs from Task 1.6 are available.
 
-- [ ] Service-layer tests using fakeRepo / cannedFileStore stubs (port
-  these stubs first; they're load-bearing in ~30 tests). Stub location:
-  `tests/conftest.py` (shared pytest fixtures).
+- [ ] Service-layer tests using `FakeContextRepo` / `CannedFileStore` /
+  `FakeEmbedder` from `tests/_fakes/`.
 - [ ] CLI integration tests (`typer.testing.CliRunner` pattern)
 - [ ] Edge-case tests: concurrent model register race (Go §5.6); empty
   extraction; encrypted PDF; image-only PDF; size cap boundary
@@ -644,13 +863,14 @@ Revisit at end of each phase.
 | FTS5 malformed bug recurs in Python | Use fixed SQL from day 1 (Go archive §3.2); regression test in Task 2.4 |
 | Cursor format incompatibility breaks pagination | Spike-validated byte-identical round-trip |
 | PyMuPDF wheel availability on user's platform | PyMuPDF has broad wheel coverage; verify on first install |
+| Pydantic v2 pulls in significant dep weight | Acceptable trade-off; Config-only scope keeps surface bounded; if dep weight becomes an issue, swap to plain dataclass + manual `__post_init__` validation (mechanical change) |
 | Async creep inflates surface area | Sync-first mandate; only embedder HTTP calls async |
-| Test porting underestimates | Phase 7 budgeted 5 full days (~50 cases) |
+| Test porting underestimates | Phase 7 budgeted 5 full days (~50 cases); fakes built upfront in Task 1.6 |
 | PDF perf regression (any engine slower than gxpdf) | PyMuPDF benchmark vs gxpdf in Task 4.1; abort + reconsider if >2× slower |
 | User data loss during cutover | Mandatory backup before write-enable |
 | Concurrent Go+Python writes during dev | Read-only Python during dev (URI `?mode=ro`) |
 | Doctor `status: OK` lying about embedder failure (Go §5.8) | Fix in Python port — make status reflect reality |
-| Module boundary erosion (cli reaching into storage) | Linter rule (ruff import-restrictions) + code review |
+| Module boundary erosion (cli reaching into storage) | ruff config + guard test in Task 1.1; reviewer enforces |
 
 ## Out of Scope
 
