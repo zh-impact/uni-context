@@ -2,6 +2,33 @@
 
 Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
+## 2026-06-26 — Repo restructured to monorepo, Go archived
+
+The Go implementation is now under `archive/go/` (frozen, no further
+development). The repository is now a monorepo holding both the archived
+Go implementation and the in-progress Python port side-by-side:
+
+```
+uni-context/
+├── archive/go/             # frozen Go implementation (reference only)
+├── python/                 # new primary implementation
+│   └── spikes/migration-spike/   # pre-migration validation (6/6 passed)
+├── docs/superpowers/
+│   ├── plans/2026-06-26-python-migration.md   # revised plan
+│   └── specs/2026-06-26-go-implementation-archive.md  # Go reference
+└── README.md
+```
+
+The revised Python migration plan locks in a **modular monolith**
+architecture (`items/ search/ embed/ pdf/ storage/ cli/`) instead of
+the hexagonal layering Go used. Go's invariants (PDF branch ordering,
+rollback contract, RRF formula, cursor format, malformed-FTS fix) are
+preserved; structure is not. See plan §"Structure vs. Invariants" and
+Go archive §1's "Python port uses a different STRUCTURE" note.
+
+Git history of the Go code is preserved. The Python port has not yet
+started execution.
+
 ## Known Limitations
 
 ### Trigram FTS requires ≥3-character queries (affects 2-char CJK search)

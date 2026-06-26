@@ -46,6 +46,31 @@ cli  ─────────►  app (DI wiring)  ─►  service  ─►  p
 source packages (`service_test`, `cli_test`-style internal tests). Most
 packages use `:memory:` SQLite with `mattn/go-sqlite3` + `-tags sqlite_fts5`.
 
+### Python port uses a different STRUCTURE, same INVARIANTS
+
+The Python port does NOT replicate this hexagonal layout. It uses a
+**modular monolith**: feature-organized modules (`items/`, `search/`,
+`embed/`, `pdf/`, `storage/`, `cli/`) with direct cross-module imports.
+See `docs/superpowers/plans/2026-06-26-python-migration.md` §Module
+Structure for the layout.
+
+What MUST be preserved when porting:
+- Every **invariant** in §3 below (PDF branch ordering, rollback
+  contract, embed-skip scope, RRF formula, cursor format, malformed-FTS
+  SQL fix, etc.) — these are correctness-load-bearing.
+- The **schema** (§2) verbatim.
+- The **bug fixes** documented in §5 (especially §5.1 malformed-FTS).
+
+What MAY change:
+- Layering / package boundaries.
+- Constructor DI style (Python's structural typing replaces Go's
+  explicit interfaces).
+- FileStore path is fixed (compat with existing data), but its API
+  shape can simplify.
+- `app/wire` becomes `cli/app.py:wire(cfg)`.
+
+Rule of thumb: **structure can change; invariants shouldn't.**
+
 ## 2. Schema (Migrations)
 
 Four migrations, applied in order. **All four are reusable verbatim in
