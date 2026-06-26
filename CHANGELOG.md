@@ -466,3 +466,44 @@ for the plan and `.superpowers/sdd/progress.md` for execution notes.
 - `--pages 1-10` page-range selection
 - Other binary formats (docx, html)
 - `--no-size-limit` escape hatch
+
+## Bugfix — Externalized content returns "database disk image is malformed" from search (2026-06-26)
+
+When `unictx search <query>` matched an item whose content was externalized
+to FileStore (>4KB → empty `context_item.content`, real text in FileStore
+under `content_uri`), the SQL query aborted with
+`Error: fts: database disk image is malformed`. The bug was latent before
+PDF Attach (3 of 11 rows in the dev DB were already externalized) but
+surfaced widely once PDF ingestion made externalization the common case.
+
+**Root cause:** `context_fts` is configured as an FTS5 external-content
+table (`content='context_item', content_rowid='rowid'`). The 2026-06-23
+"Externalized content unsearchable via FTS" bugfix made `MATCH` find the
+row by calling `ReindexFTS` to rewrite the FTS row with the extracted
+text directly (bypassing the `AFTER UPDATE` trigger). That left
+`context_fts_data` holding tokens that `context_item.content` (now empty)
+no longer contained. FTS5's `snippet(context_fts, 2, ...)` on the content
+column detects the divergence at query time and returns
+`SQLITE_CORRUPT_VTAB`, which SQLite surfaces as the misleading "disk
+image is malformed" error.
+
+**What shipped:**
+- `internal/adapter/sqlite/searcher.go:searchSQL` drops
+  `snippet(context_fts, 2, ...)` (the content-column snippet). Title
+  snippet stays — title is always inline in `context_item` and the
+  integrity check doesn't fire there.
+- Untitled notes still match via FTS (the inverted index spans all
+  columns); they just have an empty `Snippet` field. The CLI display
+  already falls back to `item.Title`.
+- New regression test `TestSearcher_FTS_ExternalizedContentDoesNotCorrupt`
+  asserts: externalized content findable via MATCH; title snippet
+  populated; no error. Note: the test environment (mattn/go-sqlite3)
+  handles the divergence differently than system SQLite, so the test
+  cannot directly reproduce the malformed error — but it pins the new
+  contract (no content-column snippet call) and the findability guarantee.
+
+**Follow-up tracked (Option B from the fix discussion):** restore content
+snippets by generating them in Go from hydrated content. Requires wiring
+`ItemService` or FileStore into `SearchService.hydrate`. Not blocking;
+current behavior matches what `unictx user note get` returns for the same
+item once the display layer falls back to `item.Title`.

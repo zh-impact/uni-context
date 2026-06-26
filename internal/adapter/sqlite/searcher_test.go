@@ -131,12 +131,14 @@ func TestSearcher_FTS_QueryInjectionSafety(t *testing.T) {
 	assert.Empty(t, hits, "operator injection should be neutralized by quote escaping")
 }
 
-func TestSearcher_FTS_FallsBackToContentSnippet(t *testing.T) {
-	// When a note has no title (title=""), the snippet extracted from the
-	// title column is empty. The searcher must fall back to a content-column
-	// snippet so search results still show useful context for title-less
-	// notes (a common case when the user runs `unictx user note add foo`
-	// without --title).
+// TestSearcher_FTS_TitleLessNote_MatchesViaContent_NoSnippet: title-less
+// notes still match via content tokens (FTS index spans all columns), but
+// the snippet is empty because we no longer extract a content-column
+// snippet. See searchSQL comment for why content snippets were dropped.
+// Callers fall back to item.Title in the display layer; for title-less
+// notes that's also empty, so the CLI shows just the score. This is the
+// trade-off for fixing the malformed-FTS error on externalized content.
+func TestSearcher_FTS_TitleLessNote_MatchesViaContent_NoSnippet(t *testing.T) {
 	db := openMemWithSampleData(t, []domain.ContextItem{
 		makeItem("", "important content about deployment here"),
 	})
@@ -145,8 +147,41 @@ func TestSearcher_FTS_FallsBackToContentSnippet(t *testing.T) {
 	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "important content", Limit: 5})
 	require.NoError(t, err)
 	require.Len(t, hits, 1, "title-less note should still be findable via content match")
-	assert.Contains(t, hits[0].Snippet, "important",
-		"snippet must come from content column when title snippet is empty; got %q", hits[0].Snippet)
+	assert.Empty(t, hits[0].Snippet,
+		"snippet must be empty when title is empty; content snippets were dropped (got %q)", hits[0].Snippet)
+}
+
+// TestSearcher_FTS_ExternalizedContentDoesNotCorrupt: regression guard
+// for the malformed-FTS bug. When content is externalized post-INSERT
+// (content_item.content is empty but context_fts's inverted index retains
+// the tokens because ReindexFTS rewrote the row directly, bypassing the
+// AFTER UPDATE trigger), FTS5's snippet(context_fts, 2, ...) call detects
+// the divergence between the inverted index and the external content
+// table and returns SQLITE_CORRUPT_VTAB, surfaced by SQLite as "database
+// disk image is malformed". This MUST NOT abort the whole search — the
+// content snippet is dropped from the SQL so the MATCH+JOIN path returns
+// hits cleanly. See searcher.go:searchSQL.
+func TestSearcher_FTS_ExternalizedContentDoesNotCorrupt(t *testing.T) {
+	item := makeItem("Composer Paper", "") // empty content simulates post-externalization
+	db := openMemWithSampleData(t, []domain.ContextItem{item})
+	repo := NewContextRepo(db)
+	// Simulate ReindexFTS as IngestService.Create does after externalizing:
+	// write the real content directly to context_fts, bypassing triggers.
+	require.NoError(t, repo.ReindexFTS(context.Background(),
+		item.ID, item.Title, "", "Batchsize tuning convergence"))
+
+	// Sanity: confirm the divergence actually exists.
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM context_fts WHERE context_fts MATCH 'batchsize'`).Scan(&n))
+	require.Equal(t, 1, n, "test setup: FTS index must contain the token")
+
+	s := NewSearcher(db)
+	hits, err := s.SearchFTS(context.Background(), port.SearchQuery{Query: "Batchsize", Limit: 5})
+	require.NoError(t, err, "search must not return 'database disk image is malformed' for externalized content")
+	require.Len(t, hits, 1, "externalized content must still be findable via FTS MATCH")
+	// Title snippet still works (title is inline in context_item).
+	assert.Contains(t, hits[0].Snippet, "Composer",
+		"title snippet must still be returned for externalized rows; got %q", hits[0].Snippet)
 }
 
 // TestSearcher_FTS_LikeFallback_ShortCJKQuery: 2-char CJK queries are

@@ -51,19 +51,27 @@ func ftsQueryString(raw string) string {
 	return `"` + escaped + `"`
 }
 
-// searchSQL extracts snippets from BOTH the title column (index 0) and the
-// content column (index 2). The caller prefers the title snippet (title is
-// the canonical human-readable identifier) but falls back to the content
-// snippet when the title is empty — a common case when the user runs
-// `unictx user note add <content>` without --title.
+// searchSQL extracts a snippet from the TITLE column only (FTS5 column
+// index 0). Content-column snippets were removed because context_fts is
+// configured as an external-content table (`content='context_item'`) and
+// IngestService externalizes large content to FileStore after the FTS row
+// was written via ReindexFTS (which bypasses the AFTER UPDATE trigger).
+// The resulting divergence — FTS inverted index has tokens, context_item
+// content table is empty — makes FTS5's snippet(context_fts, 2, ...)
+// detect the inconsistency and return SQLITE_CORRUPT_VTAB, surfaced as
+// "database disk image is malformed" by SQLite. This aborted the entire
+// search for any externalized item.
+//
+// The title column is always inline in context_item, so the title snippet
+// remains safe. For untitled items, callers fall back to item.Title in
+// the display layer.
 //
 // No highlight markers are emitted: presentation concerns belong to the
 // caller, not the searcher. The snippet function's "ellipsis" argument is
 // also empty so the returned text is a verbatim slice of the column.
 const searchSQL = `
 SELECT ci.id, bm25(context_fts) AS score,
-       snippet(context_fts, 0, '', '', '…', 16) AS title_snip,
-       snippet(context_fts, 2, '', '', '…', 16) AS content_snip
+       snippet(context_fts, 0, '', '', '…', 16) AS title_snip
 FROM context_fts
 JOIN context_item ci ON ci.rowid = context_fts.rowid
 WHERE context_fts MATCH ?
@@ -98,21 +106,18 @@ func (s *Searcher) SearchFTS(ctx context.Context, q port.SearchQuery) ([]port.Se
 	var hits []port.SearchHit
 	for rows.Next() {
 		var (
-			h           port.SearchHit
-			titleSnip   sql.NullString
-			contentSnip sql.NullString
+			h         port.SearchHit
+			titleSnip sql.NullString
 		)
-		if err := rows.Scan(&h.ID, &h.Score, &titleSnip, &contentSnip); err != nil {
+		if err := rows.Scan(&h.ID, &h.Score, &titleSnip); err != nil {
 			return nil, err
 		}
-		// Prefer title snippet; fall back to content snippet when title is
-		// empty (e.g. user ran `add` without --title).
-		switch {
-		case titleSnip.String != "":
-			h.Snippet = titleSnip.String
-		case contentSnip.String != "":
-			h.Snippet = contentSnip.String
-		}
+		// Title-only snippet. Content snippet was dropped from the SQL
+		// because FTS5's external-content integrity check fires on the
+		// divergence between context_fts's inverted index and the
+		// (empty, externalized) context_item.content column. See
+		// searchSQL comment above.
+		h.Snippet = titleSnip.String
 		// bm25 returns negative scores (more negative = better match).
 		// Negate so higher score = better match.
 		h.Score = -h.Score
