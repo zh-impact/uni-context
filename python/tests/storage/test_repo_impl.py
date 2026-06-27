@@ -212,31 +212,43 @@ def test_get_missing_raises_item_not_found(migrated_db: sqlite3.Connection) -> N
 def test_update_increments_version_and_returns_mutated_item(
     migrated_db: sqlite3.Connection,
 ) -> None:
-    """update() returns the same instance with version+1 and refreshed updated_at.
+    """update() returns the same instance with version+1 and preserves updated_at.
 
-    Mirrors Go's behavior (the cosmetic where Update mutates the caller's
-    item before executing the UPDATE). The returned item has the new
-    version; updated_at is >= the original created_at.
+    Mirrors Go's repo.go:76-78 — Update increments version but does NOT
+    refresh updated_at (Go only normalizes tz; Python is tz-naive). The
+    service layer is responsible for setting updated_at before calling
+    update. The returned item carries the same updated_at the caller
+    supplied.
     """
     repo = ContextRepoImpl(migrated_db)
-    original = _full_item(id="upd-1", version=1, created_at=1_700_000_000, updated_at=1_700_000_000)
+    # Distinct updated_at (newer than created_at, as a real service would
+    # set before calling update). update() must preserve this value
+    # verbatim — no refresh, no tz touch.
+    original = _full_item(
+        id="upd-1",
+        version=1,
+        created_at=1_700_000_000,
+        updated_at=1_700_000_042,
+    )
     repo.create(original)
+    original_updated_at = original.updated_at
 
     # Mutate a content field then update.
     original.title = "Updated title"
     updated = repo.update(original)
 
-    # Same instance — Go's cosmetic preserved.
+    # Same instance — Go's mutation-order cosmetic preserved.
     assert updated is original
     assert updated.version == 2
     assert updated.title == "Updated title"
-    assert updated.updated_at >= original.created_at
+    # updated_at is preserved verbatim — repo must NOT refresh it.
+    assert updated.updated_at == original_updated_at
 
     # Re-fetch and confirm the DB has the new values.
     refetched = repo.get(original.id)
     assert refetched.version == 2
     assert refetched.title == "Updated title"
-    assert refetched.updated_at == updated.updated_at
+    assert refetched.updated_at == updated.updated_at == original_updated_at
 
 
 def test_update_missing_raises_item_not_found(migrated_db: sqlite3.Connection) -> None:

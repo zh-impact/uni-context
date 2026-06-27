@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
 from typing import Any
 
 from unictx.items.errors import ItemNotFound
@@ -195,11 +194,6 @@ def _placeholders(n: int) -> str:
     return ", ".join(["?"] * n)
 
 
-def _now_unix() -> int:
-    """Current UTC time as integer unix timestamp (matches Go's ``time.Now().Unix()``)."""
-    return int(datetime.now(UTC).timestamp())
-
-
 def _json_dumps(value: Any) -> str:
     """Compact JSON encoding to match Go's ``encoding/json`` output.
 
@@ -283,21 +277,25 @@ class ContextRepoImpl:
         **Mutates the caller's item** before executing the UPDATE:
 
         * ``item.version += 1`` (Go: ``item.Version++``)
-        * ``item.updated_at = _now_unix()`` (Go: ``item.UpdatedAt = ...``)
 
-        This is a port of Go's known cosmetic issue — the Go method
-        documents this as a "minor" item in the task plan and we
-        preserve the behavior for parity. Callers that want to keep the
-        pre-update state must copy the item first.
+        ``updated_at`` is **NOT** refreshed here. The service layer
+        (Phase 5) is responsible for setting ``item.updated_at`` before
+        calling update; this method only increments ``version`` and
+        persists. Mirrors Go's ``repo.go:76-78`` — Go does
+        ``item.UpdatedAt = item.UpdatedAt.UTC()`` (tz normalization
+        only), and Python timestamps are tz-naive unix seconds, so
+        there's no normalization to do.
+
+        Callers that want to keep the pre-update state must copy the
+        item first.
 
         Raises :class:`ItemNotFound` if no row matches ``item.id`` (Go's
         ``RowsAffected == 0`` check).
         """
         # Mutate BEFORE the UPDATE runs — Go's order. If the UPDATE
         # fails (item missing), the caller's item has still been bumped;
-        # this matches Go's behavior and is the documented cosmetic.
+        # this matches Go's behavior.
         item.version += 1
-        item.updated_at = _now_unix()
 
         tags = _json_dumps(item.tags)
         meta = _json_dumps(item.source_meta)
