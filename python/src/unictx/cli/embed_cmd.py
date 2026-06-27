@@ -162,7 +162,9 @@ def format_embedding_status_row(r: EmbeddingStatus) -> str:
     err_cell = r.last_error or ""
     if len(err_cell) > 40:
         err_cell = err_cell[:37] + "..."
-    embedded_at = int(r.embedded_at.timestamp()) if r.embedded_at else 0
+    # EmbeddingStatus.embedded_at is already an int unix epoch (see
+    # embedding_repo.py); use it directly.
+    embedded_at = r.embedded_at or 0
     return "\t".join(
         [
             r.model_slug,

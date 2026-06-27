@@ -13,7 +13,6 @@ Mirrors Go's embed_run_e_test.go (and the model tests). Two layers:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -164,7 +163,11 @@ def test_format_embedding_status_row_short_error() -> None:
         error="boom",
         last_error="boom",
         attempts=2,
-        embedded_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        # embedded_at is an int unix epoch (matches DB schema + prod path).
+        # Earlier version of this test used a datetime, which masked a
+        # production crash: format_embedding_status_row called .timestamp()
+        # on what is typed as int. Regression guarded by using int here.
+        embedded_at=1_748_784_000,
     )
     row = format_embedding_status_row(r)
     parts = row.split("\t")
@@ -172,7 +175,7 @@ def test_format_embedding_status_row_short_error() -> None:
     assert parts[1] == "failed"
     assert parts[2] == "2"
     assert parts[3] == "boom"  # short error unchanged
-    assert int(parts[4]) > 0  # epoch seconds
+    assert int(parts[4]) == 1_748_784_000
 
 
 def test_format_embedding_status_row_long_error_truncated() -> None:
@@ -184,7 +187,7 @@ def test_format_embedding_status_row_long_error_truncated() -> None:
         error=long_err,
         last_error=long_err,
         attempts=1,
-        embedded_at=datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+        embedded_at=1_748_784_000,
     )
     row = format_embedding_status_row(r)
     parts = row.split("\t")
