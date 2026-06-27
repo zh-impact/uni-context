@@ -2,6 +2,68 @@
 
 Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
+## 2026-06-28 — Python port complete through Phase 7 (feature-parity)
+
+The Python implementation under `python/` is the project's new primary,
+reaching feature-parity with the archived Go implementation. Migration
+plan Phases 1-7 are committed; Phase 8 (cutover) is documentation-only
+on this machine — no prior Go DB exists to migrate, so the read-only
+parity verification step is N/A here. The Python port is the only
+active implementation.
+
+**What shipped (577 tests passing across all phases):**
+
+- **Phase 1** — Domain types, errors, Pydantic config (XDG-aware),
+  distributed Protocols, shared test fixtures + fakes.
+- **Phase 2** — Storage layer: SQLite connection factory (sqlite-vec
+  loaded via `load_extension`), migration runner (0001-0004 with
+  FTS5 missing-extension hint), ContextRepo (base36 cursor, scoped
+  filters), Searcher (FTS5 + LIKE fallback for short queries), VectorStore
+  (vec0 KNN), EmbeddingRepo (status rows + retry columns), ModelRegistry
+  (atomic set_default), SchemaMeta.
+- **Phase 3** — FileStore (content-addressed SHA-256), OllamaEmbedder
+  (raw HTTP via httpx), OpenAIEmbedder (Bearer auth, base_url override).
+- **Phase 4** — PDF engines: PyMuPDF (default; raises PdfEncrypted /
+  PdfExtractionFailed with `reason` chained), shell (pdftotext spawn),
+  http (service-based), factory with engine override.
+- **Phase 5** — Services: IngestService (CRITICAL: PDF branch ordering
+  + 3-blob rollback contract + ReindexFTS hook preserved), SearchService
+  (RRF + 4 degradation paths), EmbedService (split vector/status writes),
+  Worker/Backfill/Reembed (threading.Event cooperative cancellation),
+  ReindexFTSService (bulk FTS rewrite), ItemService (query-side
+  hydration), ModelService (model lifecycle), DiagnosticService
+  (doctor backing).
+- **Phase 6** — CLI (Typer): global flags + `wire()` factory +
+  AppContainer, `user note add|get|list|delete`, `search` (FTS-only +
+  hybrid), `embed model add|list|remove`, `embed switch|backfill|worker|
+  reembed|status`, `doctor`, `reindex-fts`. All commands support `--json`.
+- **Phase 7** — Test backfill: E2E flow tests (note lifecycle, large-
+  content externalization round-trip, externalized-content FTS
+  regression guard), edge-case gap closure.
+
+**Invariants preserved from Go** (verified via tests):
+
+- PDF branch ordering: blob-PDF → blob-text → inline-text.
+- 3-blob rollback contract (failures leave no orphan FileStore bytes).
+- Embed-skip scope (image-only PDFs skip embed).
+- RRF formula (`score = Σ 1/(k+rank)`).
+- Base36 cursor format (Go-faithful encode/decode round-trip).
+- Malformed-FTS bugfix (title-only snippet avoids SQLITE_CORRUPT_VTAB
+  on externalized items).
+- 50 MB file cap, mutual-exclusion rules, engine validation.
+
+**Known limitations / deferred:**
+
+- Plan 2c self-heal (reconcile auto-registration from cfg fields on
+  embedder.enabled=True) is deferred — wire-time ModelNotFound is the
+  current behavior; user must `embed model add` first.
+- Concurrent model register race (Plan §5.6) — no Go test exists
+  either; tracked for future work.
+- SearchHit field divergence (`title_snip` storage-side vs `snippet`
+  Protocol-side) is bridged by the CompositeSearcher adapter in
+  `storage/search_adapter.py`. Consolidating onto one type is a
+  follow-up DRY pass.
+
 ## 2026-06-26 — Repo restructured to monorepo, Go archived
 
 The Go implementation is now under `archive/go/` (frozen, no further

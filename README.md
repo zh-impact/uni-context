@@ -31,20 +31,35 @@ uni-context/
 └── CHANGELOG.md                # cross-project change log
 ```
 
-## Status (2026-06-26)
+## Status (2026-06-28)
 
 - **Go implementation**: archived. Feature-complete through PDF Attach
   (commit `706de09` includes the malformed-FTS bugfix). No further
   development. Git history is preserved.
-- **Python implementation**: planned. Migration plan + Go archive +
-  spike results are committed; execution has not started.
+- **Python implementation**: **primary, feature-complete through Phase 7**
+  of the migration plan. Phases 1-7 shipped: domain types, storage layer
+  (FTS5 + sqlite-vec + migrations 0001-0004), embedders (Ollama +
+  OpenAI-compat), PDF engines (PyMuPDF/shell/http), services (Ingest,
+  Search, Embed, Worker, Backfill, Reembed, ReindexFTS, ItemService,
+  ModelService, DiagnosticService), full CLI (Typer with `user note
+  add|get|list|delete`, `search`, `embed model|switch|backfill|worker|
+  reembed|status`, `doctor`, `reindex-fts`). **577 tests passing.**
+- **Phase 8 (cutover)**: documentation-only on this machine — no prior
+  Go DB exists at `~/.local/share/unictx/unictx.db` to migrate from,
+  so the read-only parity verification (Task 8.1) is N/A. The Python
+  port is the only active implementation; the Go binary is not built
+  here. Future cutover ops (backup + read-write switch) require an
+  existing Go DB and explicit user authorization.
 
 See:
-- `docs/superpowers/plans/2026-06-26-python-migration.md` — active plan
+- `docs/superpowers/plans/2026-06-26-python-migration.md` — the plan
+  (Phases 1-7 complete; Phase 8 partially complete)
 - `docs/superpowers/specs/2026-06-26-go-implementation-archive.md` — Go
   reference (architecture, invariants, bugs, gotchas)
 - `python/spikes/migration-spike/spike.py` — pre-migration validation
   (6/6 risks passed)
+- `.superpowers/sdd/progress.md` — per-task progress ledger (commits,
+  test counts, design notes)
 
 ## Why migrate?
 
