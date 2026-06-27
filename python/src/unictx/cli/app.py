@@ -55,6 +55,7 @@ from unictx.storage.migrations_runner import migrate
 from unictx.storage.model_registry_impl import ModelDescriptor, ModelRegistryImpl
 from unictx.storage.repo_impl import ContextRepoImpl
 from unictx.storage.schema_meta import SchemaMetaImpl
+from unictx.storage.search_adapter import CompositeSearcher
 from unictx.storage.searcher_impl import SearcherImpl
 from unictx.storage.vectorstore_impl import VectorStoreImpl
 
@@ -143,8 +144,13 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
 
         # Storage impls (one per Protocol).
         repo = ContextRepoImpl(db)
-        searcher = SearcherImpl(db)
+        fts_searcher = SearcherImpl(db)
         vector_store = VectorStoreImpl(db)
+        # CompositeSearcher satisfies the Phase 1 Searcher Protocol by
+        # composing FTS (SearcherImpl) + vector (VectorStoreImpl) into
+        # one object. Phase 2 split the two; Phase 1 + Phase 5 expect a
+        # single Searcher with both methods. See search_adapter.py.
+        searcher = CompositeSearcher(fts_searcher, vector_store)
         embedding_repo = EmbeddingRepoImpl(db)
         fs = FileStoreImpl(cfg.data_dir / "filestore")
         registry = ModelRegistryImpl(db)

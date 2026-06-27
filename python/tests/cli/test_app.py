@@ -26,7 +26,6 @@ from unictx.cli.app import (
     get_config_path,
     get_verbose,
     is_json_mode,
-    reset_flags,
     wire,
 )
 from unictx.config import Config, EmbedderConfig
@@ -152,14 +151,6 @@ def test_wire_enabled_embedder_with_seeded_active_model(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Typer app + global flags
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_flags_around_each_test() -> None:
-    """Module-level flag globals reset before + after each test."""
-    reset_flags()
-    yield
-    reset_flags()
 
 
 def _register_dummy_command() -> None:
