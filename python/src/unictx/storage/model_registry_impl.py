@@ -66,10 +66,12 @@ startup. It does not belong in the storage layer. Deferred to Phase 7
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 from unictx.embed.errors import (
     CorruptConfigError,
+    InvalidSlugError,
     ModelConflict,
     ModelNotFound,
 )
@@ -77,6 +79,26 @@ from unictx.embed.model_registry import ModelDescriptor, ModelSpec
 from unictx.errors import UnictxError
 
 __all__ = ["ModelRegistryImpl"]
+
+
+# Slug chars: ASCII letters, digits, dashes, underscores. Rejects
+# shell-meta, semicolons, parens, quotes, whitespace — anything that
+# could break out of an SQL identifier when interpolated into vec0 DDL
+# via ``_vec_table_name``. Used by ``_validate_slug`` as a belt-and-braces
+# guard against SQL injection (slug is user input via ``ModelSpec.slug``).
+_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_slug(slug: str) -> None:
+    """Reject slugs that aren't safe SQL identifiers after dash→underscore.
+
+    Raises :class:`InvalidSlugError` (a :class:`ValueError` subclass) on
+    a bad slug. Called at the top of :meth:`ModelRegistryImpl.register`
+    and again inside :func:`_vec_table_name` as belt-and-braces — the
+    latter protects any future caller that bypasses ``register``.
+    """
+    if not _SLUG_RE.match(slug):
+        raise InvalidSlugError(slug)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +152,13 @@ def _vec_table_name(slug: str, dimension: int) -> str:
     result is a valid SQL identifier without quoting. Example:
     ``"text-embedding-3-large" @ 3072`` →
     ``"vec_text_embedding_3_large_3072"``.
+
+    Validates *slug* via :func:`_validate_slug` as belt-and-braces: even
+    though ``register`` already validates, any future caller that
+    bypasses ``register`` (e.g. a heal path that rebuilds vec tables
+    from a config dump) is still protected against SQL injection.
     """
+    _validate_slug(slug)
     return f"vec_{slug.replace('-', '_')}_{dimension}"
 
 
@@ -287,7 +315,17 @@ class ModelRegistryImpl:
         ``BEGIN``/``COMMIT`` transaction — a partial failure (e.g. vec0
         extension unavailable) leaves the embedding_model row absent
         too, so a retry doesn't have to clean up a half-registered row.
+
+        Raises :class:`InvalidSlugError` (a :class:`ValueError`) if the
+        slug contains characters unsafe for SQL identifier use — the
+        validation happens before the pre-check, before any SQL is
+        issued, so a bad slug never reaches the DB.
         """
+        # Validate slug FIRST: it flows into raw SQL via _vec_table_name
+        # (CREATE VIRTUAL TABLE / DROP TABLE / vec0 DML). Defense in
+        # depth against SQL injection from user-supplied ModelSpec.slug.
+        _validate_slug(spec.slug)
+
         # Pre-check so we can return a clean ModelConflict instead of
         # relying on driver-specific constraint text (which differs
         # across sqlite versions). Mirrors Go's pre-check.

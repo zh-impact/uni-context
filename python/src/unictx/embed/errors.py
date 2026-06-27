@@ -92,3 +92,24 @@ class SchemaMetaNotFound(UnictxError):
 
     def __init__(self) -> None:
         super().__init__("schema_meta row missing: key='schema_version'")
+
+
+class InvalidSlugError(ValueError):
+    """Raised when a model slug contains characters unsafe for SQL identifier use.
+
+    Slugs flow into ``_vec_table_name`` and are interpolated into raw
+    SQL (``CREATE VIRTUAL TABLE``, ``DROP TABLE``, vec0 DML) — see
+    :func:`unictx.storage.model_registry_impl._vec_table_name`. A slug
+    containing shell-meta, semicolons, parens, or quotes could break
+    out of the SQL identifier and inject statements.
+
+    Inherits from :class:`ValueError` (not :class:`UnictxError`) because
+    this is **input validation** — "the caller handed us a bad value" —
+    not a domain-level failure like "model not found" or "model
+    conflict". Callers can catch :class:`ValueError` generically or
+    :class:`InvalidSlugError` specifically.
+    """
+
+    def __init__(self, slug: str):
+        super().__init__(f"invalid model slug {slug!r}: must match [a-zA-Z0-9_-]+")
+        self.slug = slug

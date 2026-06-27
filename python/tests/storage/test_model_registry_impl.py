@@ -34,6 +34,7 @@ import pytest
 
 from unictx.embed.errors import (
     CorruptConfigError,
+    InvalidSlugError,
     ModelConflict,
     ModelNotFound,
 )
@@ -89,6 +90,168 @@ class TestVecTableName:
 
     def test_simple_slug(self) -> None:
         assert _vec_table_name("bge-m3", 1024) == "vec_bge_m3_1024"
+
+
+# ---------------------------------------------------------------------------
+# Slug validation — defense in depth against SQL injection.
+#
+# Slugs flow into raw SQL via _vec_table_name (CREATE VIRTUAL TABLE,
+# DROP TABLE, vec0 INSERT/DELETE/SELECT). _validate_slug rejects any
+# slug containing characters outside [a-zA-Z0-9_-]+ so a malicious or
+# malformed slug cannot break out of the SQL identifier.
+# ---------------------------------------------------------------------------
+
+
+class TestVecTableNameValidates:
+    """``_vec_table_name`` validates slug as belt-and-braces.
+
+    Even though ``register`` validates first, ``_vec_table_name`` is the
+    actual SQL-interpolation seam — any future caller that bypasses
+    ``register`` (e.g. a heal path that rebuilds vec tables from a
+    config dump) is still protected.
+    """
+
+    def test_rejects_injection_attempt(self) -> None:
+        """Classic SQL injection payload must be rejected."""
+        with pytest.raises(InvalidSlugError) as excinfo:
+            _vec_table_name("evil; DROP TABLE users; --", 8)
+        assert excinfo.value.slug == "evil; DROP TABLE users; --"
+
+    def test_accepts_valid_slug(self) -> None:
+        """A valid slug returns the expected vec table name."""
+        assert _vec_table_name("bge-m3", 1024) == "vec_bge_m3_1024"
+
+
+class TestRegisterSlugValidation:
+    """``register`` validates slug before any SQL is issued."""
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "evil; DROP TABLE users; --",
+            "bad/slug",
+            "bad'slug",
+            "(bad)",
+            "",  # empty — must NOT match [a-zA-Z0-9_-]+
+            "bad slug",  # space
+            "tab\tslug",  # tab
+            "newline\nslug",  # newline
+            'quote"slug',  # double quote
+            "back`tick",  # backtick (SQL identifier quoting)
+            "dollar$slug",  # dollar (shell var / psql var)
+            "semi;colon",  # semicolon (statement terminator)
+            "parens(slug)",  # parens (subquery)
+            "star*slug",  # star (SELECT *)
+            "amp&slug",  # ampersand (shell bg)
+            "pipe|slug",  # pipe (shell pipe)
+            "lt<slug",  # angle brackets
+            "uni-é-acute",  # non-ASCII letter (rejected by ASCII-only class)
+        ],
+    )
+    def test_register_rejects_invalid_slug(self, slug: str) -> None:
+        """Each slug above must be rejected with InvalidSlugError.
+
+        ``InvalidSlugError`` is a ``ValueError`` subclass — both
+        ``except ValueError`` and ``except InvalidSlugError`` catch it.
+        We assert the specific subclass so a future refactor that
+        accidentally swaps the base class is caught.
+        """
+        spec = ModelSpec(
+            slug=slug,
+            provider="x",
+            base_url="y",
+            api_key="z",
+            dimension=8,
+        )
+        # Use a fresh in-memory DB so an empty-slug case doesn't trip
+        # the pre-check on an existing row.
+        from unictx.storage.db import open_db
+        from unictx.storage.migrations_runner import migrate
+
+        db = open_db(":memory:")
+        try:
+            migrate(db)
+            reg = ModelRegistryImpl(db)
+            with pytest.raises(InvalidSlugError) as excinfo:
+                reg.register(spec)
+            assert excinfo.value.slug == slug
+            # Belt-and-braces: also catchable as ValueError.
+            assert isinstance(excinfo.value, ValueError)
+        finally:
+            db.close()
+
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "bge-m3",
+            "text-embedding-3-large",
+            "model_v1",
+            "openai-3-small",
+            "alpha",  # bare word
+            "ABC123",  # uppercase + digits
+            "a",  # single char
+        ],
+    )
+    def test_register_accepts_valid_slugs(self, slug: str) -> None:
+        """All canonical slugs must register successfully.
+
+        Guards against an over-strict regex breaking existing call sites
+        (e.g. Phase 3+ register-from-config paths will hit this).
+        """
+        spec = ModelSpec(
+            slug=slug,
+            provider="x",
+            base_url="y",
+            api_key="z",
+            dimension=8,
+        )
+        from unictx.storage.db import open_db
+        from unictx.storage.migrations_runner import migrate
+
+        db = open_db(":memory:")
+        try:
+            migrate(db)
+            # Migration 0002 seeds ``bge-m3`` as the default — drop it
+            # first so we can register any slug (including bge-m3 itself)
+            # without tripping the pre-check.
+            db.execute("DROP TABLE IF EXISTS vec_bge_m3_1024")
+            db.execute("DELETE FROM embedding_model")
+            reg = ModelRegistryImpl(db)
+            reg.register(spec)
+            m = reg.get(slug)
+            assert m.slug == slug
+        finally:
+            db.close()
+
+    def test_validation_runs_before_precheck(self) -> None:
+        """An invalid slug raises InvalidSlugError, NOT ModelConflict.
+
+        Regression: if validation ran AFTER the pre-check and the bad
+        slug happened to collide with an existing row, the caller would
+        see ModelConflict instead of InvalidSlugError — obscuring the
+        real problem (bad input, not a duplicate).
+        """
+        from unictx.storage.db import open_db
+        from unictx.storage.migrations_runner import migrate
+
+        db = open_db(":memory:")
+        try:
+            migrate(db)
+            reg = ModelRegistryImpl(db)
+            # bge-m3 is seeded by migration 0002 — but the invalid-char
+            # variant "bge-m3;" must still raise InvalidSlugError, not
+            # ModelConflict (even though "bge-m3" exists in the table).
+            bad_spec = ModelSpec(
+                slug="bge-m3; DROP TABLE users; --",
+                provider="x",
+                base_url="y",
+                api_key="z",
+                dimension=8,
+            )
+            with pytest.raises(InvalidSlugError):
+                reg.register(bad_spec)
+        finally:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
