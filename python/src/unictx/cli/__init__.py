@@ -16,11 +16,15 @@ Registration styles:
 from __future__ import annotations
 
 from unictx.cli.app import app
+from unictx.cli.embed_cmd import embed_app
 from unictx.cli.search import search as _search_cmd
 from unictx.cli.user_note import user_app
 
 # Register the `user` Typer (which itself contains the `note` Typer).
 app.add_typer(user_app, name="user")
+# `embed` registers as a Typer with subcommands (model/switch/backfill/
+# worker/reembed/status).
+app.add_typer(embed_app, name="embed")
 # `search` registers as a direct top-level command. Function imported
 # under a private alias above so the public ``unictx.cli.search`` name
 # remains bound to the submodule (tests do ``import unictx.cli.search
