@@ -6,10 +6,16 @@ Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
 The Python implementation under `python/` is the project's new primary,
 reaching feature-parity with the archived Go implementation. Migration
-plan Phases 1-7 are committed; Phase 8 (cutover) is documentation-only
-on this machine — no prior Go DB exists to migrate, so the read-only
-parity verification step is N/A here. The Python port is the only
-active implementation.
+plan Phases 1-7 are committed; Phase 8 Task 8.1 (read-only parity
+verification) ran against a real Go-format DB at
+`~/dotfiles/local/share/unictx/unictx.db` (XDG_DATA_HOME override) —
+19 user notes + 17 embeddings under the OpenAI default model. All
+read paths verified (doctor / list / get inline + externalized PDF /
+FTS + hybrid search with real RRF / embed model list / embed status
+with and without rows / reindex-fts --dry-run); surfaced and fixed
+one formatter bug (`embed status` crashed on int-typed `embedded_at`,
+commit `a4d2f32`). Task 8.2 (backup + read-write cutover) remains
+pending explicit user authorization.
 
 **What shipped (577 tests passing across all phases):**
 
@@ -40,6 +46,10 @@ active implementation.
 - **Phase 7** — Test backfill: E2E flow tests (note lifecycle, large-
   content externalization round-trip, externalized-content FTS
   regression guard), edge-case gap closure.
+- **Phase 8.1** — Read-only parity verification on real Go-format DB
+  (19 notes, 17 embeddings). All read paths green; one formatter bug
+  fixed in flight (`a4d2f32`: `embed status` plain-text mode called
+  `.timestamp()` on an int — tests had masked it by passing datetime).
 
 **Invariants preserved from Go** (verified via tests):
 

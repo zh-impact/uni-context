@@ -44,12 +44,18 @@ uni-context/
   ModelService, DiagnosticService), full CLI (Typer with `user note
   add|get|list|delete`, `search`, `embed model|switch|backfill|worker|
   reembed|status`, `doctor`, `reindex-fts`). **577 tests passing.**
-- **Phase 8 (cutover)**: documentation-only on this machine — no prior
-  Go DB exists at `~/.local/share/unictx/unictx.db` to migrate from,
-  so the read-only parity verification (Task 8.1) is N/A. The Python
-  port is the only active implementation; the Go binary is not built
-  here. Future cutover ops (backup + read-write switch) require an
-  existing Go DB and explicit user authorization.
+- **Phase 8 (cutover)**: Task 8.1 (read-only parity verification) ran
+  against a real Go-format DB at `~/dotfiles/local/share/unictx/unictx.db`
+  (XDG_DATA_HOME override) — 19 user notes + 17 embeddings under the
+  OpenAI default model. All read paths verified: `doctor` (schema v4 +
+  embedder ping), `user note list/get` (inline + externalized PDF
+  hydration), `search` (FTS, hybrid with real RRF over the embedded
+  corpus), `embed model list`, `embed status` (with and without
+  embeddings), `reindex-fts --dry-run`. The verification surfaced one
+  formatter bug (`embed status` crashed on int-typed `embedded_at`),
+  fixed in `a4d2f32`. Task 8.2 (backup + read-write cutover) remains
+  pending explicit user authorization — destructive ops on the source
+  DB are not in scope for read-only parity.
 
 See:
 - `docs/superpowers/plans/2026-06-26-python-migration.md` — the plan
