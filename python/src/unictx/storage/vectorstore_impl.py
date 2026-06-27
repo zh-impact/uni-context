@@ -75,7 +75,7 @@ import sqlite3
 
 import sqlite_vec
 
-from unictx.errors import UnictxError
+from unictx.embed.errors import ModelNotFound
 from unictx.search.vectorstore import VectorHit
 from unictx.storage.repo_impl import _placeholders
 from unictx.storage.searcher_impl import clamp_limit
@@ -85,26 +85,6 @@ __all__ = [
     "VectorHit",
     "VectorStoreImpl",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-
-class ModelNotFound(UnictxError):
-    """Raised when an unknown model slug is passed to VectorStore methods.
-
-    Mirrors Go's ``fmt.Errorf("lookup vec table for model %s: %w", ...)``
-    wrapping ``sql.ErrNoRows``. Distinct from :class:`ItemNotFound`
-    (which is item-keyed) because the failure mode is "the model isn't
-    registered" — the caller's fix is to register the model, not to
-    retry with a different item id.
-    """
-
-    def __init__(self, model_slug: str):
-        super().__init__(f"model not found: {model_slug}")
-        self.model_slug = model_slug
 
 
 # ---------------------------------------------------------------------------

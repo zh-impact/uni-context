@@ -59,3 +59,36 @@ class StatusNotFound(UnictxError):
         super().__init__(f"embedding status not found: item={item_id} model={model_slug}")
         self.item_id = item_id
         self.model_slug = model_slug
+
+
+class CorruptConfigError(UnictxError):
+    """Raised by ModelRegistry scan helper when ``config`` JSON is unparseable.
+
+    Ports Go's ``ErrCorruptConfig`` sentinel. The descriptor's identity
+    fields (slug/name/provider/dimension/vec_table/is_default/status)
+    scan cleanly; only the embedded ``base_url``/``api_key`` are
+    unrecoverable. Callers needing only the identity — e.g.
+    ``set_default`` — can ignore this error; callers that need the
+    config must heal the row first.
+
+    The descriptor is attached as :attr:`descriptor` so callers can
+    inspect what they did recover.
+    """
+
+    def __init__(self, message: str, *, descriptor: object) -> None:
+        super().__init__(message)
+        self.descriptor = descriptor
+
+
+class SchemaMetaNotFound(UnictxError):
+    """Raised by SchemaMetaImpl.version when no ``schema_version`` row exists.
+
+    Mirrors Go's wrapped error from ``Version``: the ``schema_meta``
+    table is empty or missing the ``schema_version`` key. Should be
+    unreachable on a normally-bootstrapped DB (the migration runner
+    seeds the key on first run), but surfaces cleanly for misconfigured
+    read-only connections or hand-edited DBs.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("schema_meta row missing: key='schema_version'")
