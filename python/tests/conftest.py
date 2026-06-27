@@ -40,7 +40,7 @@ def tmp_db() -> Iterator[sqlite3.Connection]:
     """Fresh :memory: SQLite with sqlite-vec loaded; no migrations applied.
 
     Storage tests that need schema call ``migrate(db)`` (Task 2.2) themselves,
-    or use a ``migrated_db`` fixture (added in Task 2.2 once migrate exists).
+    or use the ``migrated_db`` fixture below.
 
     Uses ``:memory:`` rather than ``tmp_path`` — in-memory DBs don't need a
     filesystem path, are faster, and are isolated per-test by construction.
@@ -48,5 +48,22 @@ def tmp_db() -> Iterator[sqlite3.Connection]:
     from unictx.storage.db import open_db
 
     db = open_db(":memory:")
+    yield db
+    db.close()
+
+
+@pytest.fixture
+def migrated_db() -> Iterator[sqlite3.Connection]:
+    """Fresh :memory: DB with all migrations applied (schema_version='4').
+
+    Ready for storage-impl tests (Task 2.3+): the connection already has
+    ``row_factory = scan_item`` set by :func:`open_db`, and the schema is
+    fully migrated. Each test gets its own isolated in-memory DB.
+    """
+    from unictx.storage.db import open_db
+    from unictx.storage.migrations_runner import migrate
+
+    db = open_db(":memory:")
+    migrate(db)
     yield db
     db.close()

@@ -57,6 +57,8 @@ from pathlib import Path
 
 import sqlite_vec
 
+from unictx.storage.row_factory import scan_item
+
 __all__ = ["open_db"]
 
 
@@ -133,6 +135,18 @@ def open_db(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
         # Defensive: disable further extension loading so untrusted SQL
         # can't pull in arbitrary shared objects via load_extension().
         conn.enable_load_extension(False)
+
+    # Row factory: every SELECT against context_item returns a ContextItem
+    # directly (see storage/row_factory.py). Registered here so callers
+    # never need to set it themselves; tests that open a bare :memory:
+    # via this function get the same row mapping as production. The
+    # factory is name-based — it no-ops for SELECTs that don't touch
+    # context_item columns (the name lookup simply fails to find
+    # expected keys, which would surface as a KeyError on first use
+    # rather than silently mis-scanning). Callers selecting from other
+    # tables should use a cursor with `row_factory = None` or accept
+    # raw tuples via `db.execute(...).fetchone()`.
+    conn.row_factory = scan_item
 
     # Ping — SQLite doesn't surface open errors until first use. SELECT 1
     # is the cheapest way to force that surface.
