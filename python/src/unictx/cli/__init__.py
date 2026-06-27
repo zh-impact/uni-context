@@ -16,7 +16,9 @@ Registration styles:
 from __future__ import annotations
 
 from unictx.cli.app import app
+from unictx.cli.doctor import doctor as _doctor_cmd
 from unictx.cli.embed_cmd import embed_app
+from unictx.cli.reindex_fts_cmd import reindex_fts as _reindex_fts_cmd
 from unictx.cli.search import search as _search_cmd
 from unictx.cli.user_note import user_app
 
@@ -25,10 +27,12 @@ app.add_typer(user_app, name="user")
 # `embed` registers as a Typer with subcommands (model/switch/backfill/
 # worker/reembed/status).
 app.add_typer(embed_app, name="embed")
-# `search` registers as a direct top-level command. Function imported
-# under a private alias above so the public ``unictx.cli.search`` name
-# remains bound to the submodule (tests do ``import unictx.cli.search
-# as search_mod`` to monkeypatch ``_load_container``).
+# Direct top-level commands. Imported under private aliases so the
+# public ``unictx.cli.<name>`` binding stays on the submodule (tests
+# do ``import unictx.cli.search as search_mod`` to monkeypatch the
+# ``_load_container`` seam).
 app.command(name="search")(_search_cmd)
+app.command(name="doctor")(_doctor_cmd)
+app.command(name="reindex-fts")(_reindex_fts_cmd)
 
 __all__ = ["app"]
