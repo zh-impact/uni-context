@@ -23,7 +23,6 @@ owner). ``_open_with_data`` migrates and inserts the items via
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
 
 import pytest
 
@@ -464,8 +463,3 @@ class TestSearchHitShape:
         assert h.id == "abc"
         assert h.score == 1.5
         assert h.title_snip == "..."
-
-
-# Suppress unused-import warning for Any (kept for type-completeness
-# with the helper signature in case future tests need it).
-_: Any = None

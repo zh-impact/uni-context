@@ -77,7 +77,6 @@ import sqlite_vec
 
 from unictx.embed.errors import ModelNotFound
 from unictx.search.vectorstore import VectorHit
-from unictx.storage.repo_impl import _placeholders
 from unictx.storage.searcher_impl import clamp_limit
 
 __all__ = [
@@ -224,10 +223,10 @@ class VectorStoreImpl:
         parts: list[str] = []
         args: list[object] = [blob]
         if scopes:
-            parts.append(f"ci.scope IN ({_placeholders(len(scopes))})")
+            parts.append(f"ci.scope IN ({', '.join(['?'] * len(scopes))})")
             args.extend(scopes)
         if kinds:
-            parts.append(f"ci.kind IN ({_placeholders(len(kinds))})")
+            parts.append(f"ci.kind IN ({', '.join(['?'] * len(kinds))})")
             args.extend(kinds)
         filter_sql = (" AND " + " AND ".join(parts)) if parts else ""
 

@@ -107,7 +107,7 @@ def test_open_go_written_db_read_only() -> None:
     """
     db = open_db(_GO_DB_PATH, read_only=True)
     try:
-        row = db.execute("SELECT version FROM schema_meta").fetchone()
+        row = db.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
     finally:
         db.close()
     assert row is not None

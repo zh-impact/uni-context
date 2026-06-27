@@ -140,12 +140,11 @@ def open_db(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     # directly (see storage/row_factory.py). Registered here so callers
     # never need to set it themselves; tests that open a bare :memory:
     # via this function get the same row mapping as production. The
-    # factory is name-based — it no-ops for SELECTs that don't touch
-    # context_item columns (the name lookup simply fails to find
-    # expected keys, which would surface as a KeyError on first use
-    # rather than silently mis-scanning). Callers selecting from other
-    # tables should use a cursor with `row_factory = None` or accept
-    # raw tuples via `db.execute(...).fetchone()`.
+    # factory sniffs column names — SELECTs whose column set doesn't
+    # match context_item's (e.g. joins over context_fts/vec0 tables,
+    # reads from embedding_model/schema_meta) pass through as raw tuples
+    # with no opt-in required. See row_factory.py:scan_item for the
+    # sniffing contract.
     conn.row_factory = scan_item
 
     # Ping — SQLite doesn't surface open errors until first use. SELECT 1

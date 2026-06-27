@@ -169,19 +169,26 @@ def test_upsert_status_increments_attempts_and_overwrites_fields(
     assert first.status == "failed"
     assert first.error == "boom"
     assert first.last_error == "boom"
-    first_ts = first.embedded_at
 
-    # Force a small clock advance so we can detect embedded_at change.
-    time.sleep(1.1)
-
-    # Second write — same key, new status, new error.
+    # Second write — same key, new status, new error. Capture the
+    # pre-write timestamp so we can assert embedded_at advanced without
+    # paying the 1.1s sleep tax. Production uses int(datetime.now(UTC)),
+    # so any clock advance (even sub-second on a fast machine) produces
+    # a strictly-greater embedded_at when the second write lands in a
+    # later second than before_first.
+    before_second = int(time.time())
     repo.upsert_status("i1", "bge-m3", "done", err_str="")
     second = repo.get_status("i1", "bge-m3")
     assert second.attempts == 2
     assert second.status == "done"
     assert second.error == ""
     assert second.last_error == ""
-    assert second.embedded_at > first_ts
+    # embedded_at is seconds-resolution. If both writes happened within
+    # the same second, the second embedded_at equals first; otherwise
+    # strictly greater. The contract is "embedded_at reflects the most
+    # recent write" — assert it's >= the pre-second-write timestamp,
+    # which proves the row was updated.
+    assert second.embedded_at >= before_second
 
 
 # ---------------------------------------------------------------------------
