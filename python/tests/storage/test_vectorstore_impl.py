@@ -103,7 +103,7 @@ def _put_item(
     """Create a ContextItem (fires AFTER INSERT FTS trigger) and put its vector."""
     item = _make_item(title, scope=scope)
     repo.create(item)
-    vs.put(item.id, "bge-m3", vec)
+    vs.put("bge-m3", item.id, vec)
     return item.id
 
 
@@ -182,7 +182,7 @@ class TestPutIdempotency:
         id1 = _put_item(migrated_db, repo, store, "title", _vec1024((0, 1.0)))
 
         # Second put on same key — idempotent UPSERT.
-        store.put(id1, "bge-m3", _vec1024((0, 1.0)))
+        store.put("bge-m3", id1, _vec1024((0, 1.0)))
 
         hits = store.search(
             vector=_vec1024((0, 1.0)),
@@ -206,7 +206,7 @@ class TestPutIdempotency:
         id1 = _put_item(migrated_db, repo, store, "title", _vec1024((0, 1.0)))
 
         # Replace embedding: e_0 -> e_1.
-        store.put(id1, "bge-m3", _vec1024((1, 1.0)))
+        store.put("bge-m3", id1, _vec1024((1, 1.0)))
 
         # Query e_1; id1 should be the closest match now.
         hits = store.search(
@@ -234,7 +234,7 @@ class TestDelete:
         repo = ContextRepoImpl(migrated_db)
         id1 = _put_item(migrated_db, repo, store, "title", _vec1024((0, 1.0)))
 
-        store.delete(id1, "bge-m3")
+        store.delete("bge-m3", id1)
 
         hits = store.search(
             vector=_vec1024((0, 1.0)),
@@ -253,7 +253,7 @@ class TestDelete:
         Mirrors Go's VectorStore interface contract ("No-op if absent").
         """
         # Should not raise.
-        store.delete("does-not-exist", "bge-m3")
+        store.delete("bge-m3", "does-not-exist")
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ class TestDimensionMismatch:
         # Default model expects 1024-dim; pass 4-dim.
         wrong = [1.0, 0.0, 0.0, 0.0]
         with pytest.raises((sqlite3.Error, ValueError)):
-            store.put(item.id, "bge-m3", wrong)
+            store.put("bge-m3", item.id, wrong)
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +303,7 @@ class TestLimitClamp:
         for i in range(12):
             item = _make_item("item")
             repo.create(item)
-            store.put(item.id, "bge-m3", _vec1024((i, 1.0)))
+            store.put("bge-m3", item.id, _vec1024((i, 1.0)))
 
         hits = store.search(
             vector=_vec1024((0, 1.0)),
@@ -326,7 +326,7 @@ class TestLimitClamp:
         for i in range(30):
             item = _make_item("item")
             repo.create(item)
-            store.put(item.id, "bge-m3", _vec1024((i, 1.0)))
+            store.put("bge-m3", item.id, _vec1024((i, 1.0)))
 
         hits = store.search(
             vector=_vec1024((0, 1.0)),
@@ -348,7 +348,7 @@ class TestLimitClamp:
         for i in range(30):
             item = _make_item("item")
             repo.create(item)
-            store.put(item.id, "bge-m3", _vec1024((i, 1.0)))
+            store.put("bge-m3", item.id, _vec1024((i, 1.0)))
 
         hits = store.search(
             vector=_vec1024((0, 1.0)),
@@ -384,8 +384,8 @@ class TestScopeKindFilters:
         repo.create(global_item)
 
         vec = _vec1024((0, 1.0))
-        store.put(user_item.id, "bge-m3", vec)
-        store.put(global_item.id, "bge-m3", vec)
+        store.put("bge-m3", user_item.id, vec)
+        store.put("bge-m3", global_item.id, vec)
 
         hits = store.search(
             vector=vec,
@@ -411,8 +411,8 @@ class TestScopeKindFilters:
         repo.create(doc_item)
 
         vec = _vec1024((0, 1.0))
-        store.put(note_item.id, "bge-m3", vec)
-        store.put(doc_item.id, "bge-m3", vec)
+        store.put("bge-m3", note_item.id, vec)
+        store.put("bge-m3", doc_item.id, vec)
 
         hits = store.search(
             vector=vec,
@@ -447,7 +447,7 @@ class TestRealDimension:
         repo.create(item)
 
         vec = [float(i % 10) for i in range(1024)]
-        store.put(item.id, "bge-m3", vec)
+        store.put("bge-m3", item.id, vec)
 
         hits = store.search(
             vector=vec,
@@ -474,7 +474,7 @@ class TestModelNotFound:
         from unictx.storage.vectorstore_impl import ModelNotFound
 
         with pytest.raises(ModelNotFound):
-            store.put("id", "no-such-model", [1.0])
+            store.put("no-such-model", "id", [1.0])
 
     def test_search_unknown_model_raises(
         self,
@@ -496,7 +496,7 @@ class TestModelNotFound:
         from unictx.storage.vectorstore_impl import ModelNotFound
 
         with pytest.raises(ModelNotFound):
-            store.delete("id", "no-such-model")
+            store.delete("no-such-model", "id")
 
 
 # ---------------------------------------------------------------------------

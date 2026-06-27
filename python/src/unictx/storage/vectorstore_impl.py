@@ -157,7 +157,7 @@ class VectorStoreImpl:
 
     # ---- writes ----------------------------------------------------------
 
-    def put(self, item_id: str, model_slug: str, vector: list[float]) -> None:
+    def put(self, model_slug: str, item_id: str, vector: list[float]) -> None:
         """UPSERT embedding via DELETE+INSERT in a single transaction.
 
         vec0 doesn't support ``INSERT OR REPLACE`` on its TEXT PK (the
@@ -167,6 +167,10 @@ class VectorStoreImpl:
         (``isolation_level=None``) — without the explicit tx, the two
         statements would be auto-committed separately and a partial
         failure could leave the table without the row.
+
+        Parameter order is ``(model_slug, item_id, vector)`` — matches the
+        :class:`unictx.search.vectorstore.VectorStore` Protocol and Go's
+        ``Put(ctx, model, itemID, vector)``.
 
         Mirrors Go's ``Put``.
         """
@@ -187,8 +191,12 @@ class VectorStoreImpl:
             self._db.execute("ROLLBACK")
             raise
 
-    def delete(self, item_id: str, model_slug: str) -> None:
+    def delete(self, model_slug: str, item_id: str) -> None:
         """Delete the embedding for *item_id* under *model_slug*.
+
+        Parameter order is ``(model_slug, item_id)`` — matches the
+        :class:`unictx.search.vectorstore.VectorStore` Protocol and Go's
+        ``Delete(ctx, model, itemID)``.
 
         No-op if the (item, model) pair was never put — mirrors Go's
         ``Delete`` (which also doesn't check rowcount; the vec0 DELETE
