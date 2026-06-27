@@ -38,5 +38,7 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "PT"]
 known-first-party = ["unictx"]
 
 [tool.ruff.lint.per-file-ignores]
-# CLI files don't use pytest fixtures/style — disable PT family there.
-"src/unictx/cli/*" = ["PT"]
+# CLI files use Typer idioms (typer.Option in default position) and don't
+# carry pytest fixtures. Disable PT family + B008 (function call in
+# argument default — Typer requires it) for the whole cli/ subtree.
+"src/unictx/cli/*" = ["PT", "B008"]

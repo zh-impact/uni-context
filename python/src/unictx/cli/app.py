@@ -291,17 +291,17 @@ def get_verbose() -> bool:
 
 @app.callback()
 def _main(  # noqa: PLR0913 - Typer translates these to CLI flags
-    config: Path | None = typer.Option(  # noqa: B008 - Typer requires Option() in default position
+    config: Path | None = typer.Option(
         None,
         "--config",
         help="Path to config.yaml (default: $XDG_CONFIG_HOME/unictx/config.yaml).",
     ),
-    json: bool = typer.Option(  # noqa: A002, B008 - mirrors --json flag; Typer pattern
+    json: bool = typer.Option(  # noqa: A002 - mirrors --json flag name
         False,
         "--json",
         help="Emit machine-readable JSON instead of human-friendly tables.",
     ),
-    verbose: bool = typer.Option(  # noqa: B008 - Typer requires Option() in default position
+    verbose: bool = typer.Option(
         False,
         "--verbose",
         help="Emit extra diagnostic output (SQL timing, HTTP requests, etc.).",
