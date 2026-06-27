@@ -156,6 +156,20 @@ def test_validate_file_import_rejects_missing_file(tmp_path: Path) -> None:
     assert "stat file" in err or "no such file" in err.lower()
 
 
+def test_validate_file_import_rejects_directory(tmp_path: Path) -> None:
+    """Directory at the --file path is rejected — only regular files accepted.
+
+    Mirrors Go's TestValidateFileImport_Directory. Without this check, the
+    subsequent read_bytes() call would fail with a confusing permission/
+    directory error rather than a clear validation message up-front.
+    """
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    err = validate_file_import(str(subdir))
+    assert err is not None
+    assert "not a regular file" in err.lower() or "directory" in err.lower()
+
+
 def test_validate_file_import_accepts_regular_file(tmp_path: Path) -> None:
     f = tmp_path / "note.txt"
     f.write_text("hello")
