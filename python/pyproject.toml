@@ -20,6 +20,15 @@ dependencies = [
 requires = ["uv_build>=0.11.14,<0.12.0"]
 build-backend = "uv_build"
 
+# CLI entry point. ``unictx.cli:app`` resolves to the Typer instance
+# exported by ``unictx/cli/__init__.py``; importing that module runs
+# the ``app.add_typer(...)`` / ``app.command(...)`` registrations, so
+# the returned ``app`` is fully wired. Typer instances are callable
+# (their ``__call__`` dispatches the CLI), so this works as a console
+# script entry point.
+[project.scripts]
+unictx = "unictx.cli:app"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
