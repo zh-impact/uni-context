@@ -69,17 +69,30 @@ phases of the migration plan are addressed.
   on externalized items).
 - 50 MB file cap, mutual-exclusion rules, engine validation.
 
+**P2 cleanup (2026-06-28):**
+
+- **Plan 2c self-heal landed** (`bcd8419`). `wire()` now auto-registers
+  the cfg-driven model when `embedder.enabled=True` and no row with
+  that slug exists; sets it as default if no default exists. Idempotent
+  and never overrides a user-chosen default. Folded in a related fix:
+  `_build_embedder_from_active` now accepts `"openai-compat"` as an
+  alias for `"openai"` (cfg vs DB historical spelling).
+- **Concurrent register race — already covered.** The Python port's
+  `register()` wraps INSERT in BEGIN/COMMIT and catches UNIQUE
+  violations as `ModelConflict`, and `TestRaceProtection::
+  test_integrity_error_on_insert_translates_to_conflict` already
+  exercises the race path. The "no Go test exists" note was Go-only;
+  no Python work was needed.
+- **SearchHit DRY pass landed** (`4f80f8e`). Renamed the storage-side
+  `title_snip` field to `snippet` to match the Protocol-side
+  dataclass. The "title-only" rationale stays in the SQL comment and
+  dataclass docstring. The CompositeSearcher adapter still exists to
+  keep storage decoupled from the higher-layer Protocol, but no longer
+  translates field names.
+
 **Known limitations / deferred:**
 
-- Plan 2c self-heal (reconcile auto-registration from cfg fields on
-  embedder.enabled=True) is deferred — wire-time ModelNotFound is the
-  current behavior; user must `embed model add` first.
-- Concurrent model register race (Plan §5.6) — no Go test exists
-  either; tracked for future work.
-- SearchHit field divergence (`title_snip` storage-side vs `snippet`
-  Protocol-side) is bridged by the CompositeSearcher adapter in
-  `storage/search_adapter.py`. Consolidating onto one type is a
-  follow-up DRY pass.
+- (none currently.)
 
 ## 2026-06-26 — Repo restructured to monorepo, Go archived
 
