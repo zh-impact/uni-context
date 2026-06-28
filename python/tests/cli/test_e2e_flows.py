@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import unictx.cli.doctor as doctor_mod
 import unictx.cli.search as search_mod
 import unictx.cli.user_note as user_note_mod
 from unictx.cli.app import app as root_app
@@ -54,6 +55,11 @@ def shared_container_factory(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(user_note_mod, "_load_container", _make)
     monkeypatch.setattr(search_mod, "_load_container", _make)
+    # doctor has its own _load_container seam; patch it too so
+    # test_doctor_runs_clean_on_fresh_state doesn't fall through to
+    # the production loader (which would ping the real OpenAI embedder
+    # and flake on network).
+    monkeypatch.setattr(doctor_mod, "_load_container", _make)
     yield _make
     for c in created:
         c.close()
