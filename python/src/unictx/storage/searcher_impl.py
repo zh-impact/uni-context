@@ -45,7 +45,7 @@ The connection's ``row_factory`` is :func:`unictx.storage.row_factory.scan_item`
 which inspects column names and only returns :class:`ContextItem` for
 ``context_item``-shaped SELECTs. Our Searcher SQL joins
 ``context_fts`` and ``context_item`` and returns computed columns
-(``id``, ``score``, ``title_snip``); the column-name set does not
+(``id``, ``score``, ``snippet``); the column-name set does not
 match the context_item shape, so ``scan_item`` passes the rows through
 as raw tuples. We consume them with ``fetchall()[0], row[1], ...``
 accordingly. The ``_get_hit_content`` test helper confirms the same
@@ -114,7 +114,7 @@ def clamp_limit(n: int) -> int:
 # 0 (title). The ellipsis argument is '…' to match Go's verbatim.
 _SEARCH_SQL = """
 SELECT ci.id, bm25(context_fts) AS score,
-       snippet(context_fts, 0, '', '', '…', 16) AS title_snip
+       snippet(context_fts, 0, '', '', '…', 16) AS snippet
 FROM context_fts
 JOIN context_item ci ON ci.rowid = context_fts.rowid
 WHERE context_fts MATCH ?
@@ -213,14 +213,14 @@ class SearchHit:
     Mirrors Go's ``port.SearchHit``. ``score`` is negated bm25 so
     higher = better match (SQLite's ``bm25()`` returns negative
     scores; lower = better. We flip the sign for caller ergonomics).
-    ``title_snip`` is a fragment of the title column; empty when the
+    ``snippet`` is a fragment of the title column; empty when the
     match was via content tokens (no content snippet is returned) or
     when the query fell through the LIKE fallback path.
     """
 
     id: str
     score: float
-    title_snip: str
+    snippet: str
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ class SearcherImpl:
         clamped = clamp_limit(limit)
 
         # row_factory (scan_item) passes through raw tuples here —
-        # the SELECT carries computed columns {id, score, title_snip},
+        # the SELECT carries computed columns {id, score, snippet},
         # not the full context_item shape. See module docstring.
         cur = self._db.execute(_SEARCH_SQL, (ftsq, clamped))
         rows = cur.fetchall()
@@ -279,14 +279,14 @@ class SearcherImpl:
         for row in rows:
             row_id = row[0]
             score = row[1]
-            title_snip = row[2]
+            snippet = row[2]
             # bm25 returns negative scores (more negative = better
             # match). Negate so higher = better — mirrors Go.
             hits.append(
                 SearchHit(
                     id=row_id,
                     score=-score,
-                    title_snip=title_snip if title_snip is not None else "",
+                    snippet=snippet if snippet is not None else "",
                 )
             )
         return hits
@@ -310,7 +310,7 @@ class SearcherImpl:
                 SearchHit(
                     id=row_id,
                     score=float(score),
-                    title_snip="",  # LIKE path leaves snippet empty by design.
+                    snippet="",  # LIKE path leaves snippet empty by design.
                 )
             )
         return hits

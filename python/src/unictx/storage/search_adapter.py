@@ -48,14 +48,14 @@ class CompositeSearcher:
     def search_fts(self, q: SearchQuery) -> list[SearchHit]:
         """BM25 keyword search via FTS5 (+ LIKE fallback for short queries).
 
-        Delegates to ``SearcherImpl.search(query, limit)`` and translates
-        the storage-side ``SearchHit`` (which carries ``title_snip`` —
-        a title-only snippet per the externalized-content corruption
-        bugfix in ``searcher_impl.py``) into the canonical
-        ``search.searcher.SearchHit`` (which carries ``snippet``).
+        Delegates to ``SearcherImpl.search(query, limit)`` and rehydrates
+        the canonical ``search.searcher.SearchHit`` from the storage-side
+        dataclass. Both dataclasses share the ``snippet`` field name —
+        the adapter exists to keep storage's SearcherImpl decoupled from
+        the higher-layer Searcher Protocol, not to translate fields.
         """
         storage_hits = self._fts.search(q.query, q.limit)
-        return [SearchHit(id=h.id, score=h.score, snippet=h.title_snip) for h in storage_hits]
+        return [SearchHit(id=h.id, score=h.score, snippet=h.snippet) for h in storage_hits]
 
     def search_vector(self, q: VectorQuery) -> list[VectorHit]:
         """vec0 KNN search via VectorStoreImpl.

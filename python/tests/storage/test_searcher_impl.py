@@ -215,7 +215,7 @@ class TestSearchFts:
             "如何部署 Go 服务到 k8s",
             "Python 部署 Flask 应用",
         }
-        actual = {h.title_snip for h in hits}
+        actual = {h.snippet for h in hits}
         assert actual == expected
 
     def test_cjk_trigram(self, make_db: sqlite3.Connection) -> None:
@@ -282,9 +282,9 @@ class TestSearchFts:
         s = SearcherImpl(make_db)
         hits = s.search("部署文", limit=5)
         assert len(hits) == 1
-        assert hits[0].title_snip != "", (
+        assert hits[0].snippet != "", (
             "3-char query must use FTS path (snippet non-empty); "
-            f"got snippet={hits[0].title_snip!r}"
+            f"got snippet={hits[0].snippet!r}"
         )
 
 
@@ -328,9 +328,9 @@ class TestExternalizedContentRegression:
         hits = s.search("Batchsize", limit=5)
         assert len(hits) == 1, "externalized content must still be findable via FTS MATCH"
         # Title snippet still works (title is inline in context_item).
-        assert "Composer" in hits[0].title_snip, (
+        assert "Composer" in hits[0].snippet, (
             "title snippet must still be returned for externalized rows; "
-            f"got {hits[0].title_snip!r}"
+            f"got {hits[0].snippet!r}"
         )
 
 
@@ -459,7 +459,7 @@ class TestSearchHitShape:
     """SearchHit dataclass has the expected fields."""
 
     def test_fields(self) -> None:
-        h = SearchHit(id="abc", score=1.5, title_snip="...")
+        h = SearchHit(id="abc", score=1.5, snippet="...")
         assert h.id == "abc"
         assert h.score == 1.5
-        assert h.title_snip == "..."
+        assert h.snippet == "..."
