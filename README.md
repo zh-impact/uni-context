@@ -44,18 +44,24 @@ uni-context/
   ModelService, DiagnosticService), full CLI (Typer with `user note
   add|get|list|delete`, `search`, `embed model|switch|backfill|worker|
   reembed|status`, `doctor`, `reindex-fts`). **577 tests passing.**
-- **Phase 8 (cutover)**: Task 8.1 (read-only parity verification) ran
-  against a real Go-format DB at `~/dotfiles/local/share/unictx/unictx.db`
-  (XDG_DATA_HOME override) — 19 user notes + 17 embeddings under the
-  OpenAI default model. All read paths verified: `doctor` (schema v4 +
-  embedder ping), `user note list/get` (inline + externalized PDF
-  hydration), `search` (FTS, hybrid with real RRF over the embedded
-  corpus), `embed model list`, `embed status` (with and without
-  embeddings), `reindex-fts --dry-run`. The verification surfaced one
-  formatter bug (`embed status` crashed on int-typed `embedded_at`),
-  fixed in `a4d2f32`. Task 8.2 (backup + read-write cutover) remains
-  pending explicit user authorization — destructive ops on the source
-  DB are not in scope for read-only parity.
+- **Phase 8 (cutover)**: complete. Task 8.1 (read-only parity
+  verification) ran against a real Go-format DB at
+  `~/dotfiles/local/share/unictx/unictx.db` (XDG_DATA_HOME override) —
+  19 user notes + 17 embeddings under the OpenAI default model. All
+  read paths verified: `doctor` (schema v4 + embedder ping),
+  `user note list/get` (inline + externalized PDF hydration), `search`
+  (FTS, hybrid with real RRF over the embedded corpus), `embed model
+  list`, `embed status` (with and without embeddings), `reindex-fts
+  --dry-run`. The verification surfaced one formatter bug (`embed
+  status` crashed on int-typed `embedded_at`), fixed in `a4d2f32`.
+  Task 8.2 (backup + read-write cutover) executed 2026-06-28: source
+  DB + filestore backed up to `~/backups/unictx-2026-06-28/` (SHA-256
+  verified), then exercised the write path — `user note add` (new row
+  + inline embed + FTS index, all auto), `search` (found it),
+  `doctor` (embedder ping OK). Pre/post PRAGMA + FTS5 integrity-check
+  both clean. The Go binary was never built on this machine; Go
+  source remains archived under `archive/go/`. Python is the only
+  active implementation.
 
 See:
 - `docs/superpowers/plans/2026-06-26-python-migration.md` — the plan

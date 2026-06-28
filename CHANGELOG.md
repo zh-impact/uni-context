@@ -2,20 +2,27 @@
 
 Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
-## 2026-06-28 — Python port complete through Phase 7 (feature-parity)
+## 2026-06-28 — Python migration complete (all 8 phases)
 
-The Python implementation under `python/` is the project's new primary,
-reaching feature-parity with the archived Go implementation. Migration
-plan Phases 1-7 are committed; Phase 8 Task 8.1 (read-only parity
-verification) ran against a real Go-format DB at
-`~/dotfiles/local/share/unictx/unictx.db` (XDG_DATA_HOME override) —
-19 user notes + 17 embeddings under the OpenAI default model. All
-read paths verified (doctor / list / get inline + externalized PDF /
-FTS + hybrid search with real RRF / embed model list / embed status
-with and without rows / reindex-fts --dry-run); surfaced and fixed
-one formatter bug (`embed status` crashed on int-typed `embedded_at`,
-commit `a4d2f32`). Task 8.2 (backup + read-write cutover) remains
-pending explicit user authorization.
+The Python implementation under `python/` is the project's primary,
+reaching feature-parity with the archived Go implementation. All 8
+phases of the migration plan are addressed.
+
+- **Phase 8.1** (read-only parity verification) ran against a real
+  Go-format DB at `~/dotfiles/local/share/unictx/unictx.db`
+  (XDG_DATA_HOME override) — 19 user notes + 17 embeddings under the
+  OpenAI default model. All read paths verified (doctor / list / get
+  inline + externalized PDF / FTS + hybrid search with real RRF /
+  embed model list / embed status with and without rows / reindex-fts
+  --dry-run); surfaced and fixed one formatter bug (`embed status`
+  crashed on int-typed `embedded_at`, commit `a4d2f32`).
+- **Phase 8.2** (backup + read-write cutover) executed 2026-06-28:
+  source DB + filestore backed up to `~/backups/unictx-2026-06-28/`
+  (SHA-256 verified), then exercised the write path — `user note add`
+  landed a new row + inline embedding + FTS index entry, `search`
+  found it, `doctor` reported OK. Pre/post PRAGMA + FTS5
+  integrity-check both clean. The Go binary was never built on this
+  machine; Go source stays archived under `archive/go/` for reference.
 
 **What shipped (577 tests passing across all phases):**
 

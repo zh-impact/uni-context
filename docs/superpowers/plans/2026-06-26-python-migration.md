@@ -998,13 +998,13 @@ Port remaining Go tests not yet ported in earlier phases. Estimated
 
 ### Task 8.2 — Backup + cutover
 
-- [ ] Backup `unictx.db` + `filestore/` to `~/backups/unictx-<date>/`
-- [ ] Point Python at the DB read-write
-- [ ] Run a known-good sequence: add note, search, embed, doctor
-- [ ] Verify no DB corruption (PRAGMA integrity_check; FTS5 integrity-check)
-- [ ] Declare Python primary; archive Go binary
-- [ ] Update README / install instructions
-- [ ] Commit: `docs: cutover to Python implementation`
+- [x] Backup `unictx.db` + `filestore/` to `~/backups/unictx-<date>/`
+- [x] Point Python at the DB read-write
+- [x] Run a known-good sequence: add note, search, embed, doctor
+- [x] Verify no DB corruption (PRAGMA integrity_check; FTS5 integrity-check)
+- [x] Declare Python primary; archive Go binary
+- [x] Update README / install instructions
+- [x] Commit: `docs: cutover to Python implementation`
 
 ---
 
