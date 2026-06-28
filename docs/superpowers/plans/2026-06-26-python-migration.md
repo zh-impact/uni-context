@@ -274,20 +274,20 @@ shared test fixtures. Every later phase depends on this.
 
 ### Task 1.1 — uv project + module skeleton + ruff config
 
-- [ ] `cd python && uv init --python 3.14 --package unictx`
+- [x] `cd python && uv init --python 3.14 --package unictx`
   (creates `python/src/unictx/` layout)
-- [ ] `uv add sqlite-vec httpx typer pydantic pyyaml pymupdf`
-- [ ] `uv add --dev pytest pytest-asyncio ruff`
-- [ ] Create empty package skeleton (all `__init__.py` files empty —
+- [x] `uv add sqlite-vec httpx typer pydantic pyyaml pymupdf`
+- [x] `uv add --dev pytest pytest-asyncio ruff`
+- [x] Create empty package skeleton (all `__init__.py` files empty —
   see Python Conventions §):
   - `python/src/unictx/{items,search,embed,pdf,storage,cli}/__init__.py`
   - `python/src/unictx/__init__.py`
   - `python/tests/{items,search,embed,pdf,storage,cli}/__init__.py`
   - `python/tests/__init__.py`
   - `python/tests/_fakes/__init__.py`
-- [ ] Verify `uv run python -c "import sqlite_vec, httpx, typer, pydantic, yaml, fitz; print('ok')"`
-- [ ] Verify `uv run pytest` collects zero tests cleanly
-- [ ] Add `[tool.ruff]` config to `pyproject.toml`:
+- [x] Verify `uv run python -c "import sqlite_vec, httpx, typer, pydantic, yaml, fitz; print('ok')"`
+- [x] Verify `uv run pytest` collects zero tests cleanly
+- [x] Add `[tool.ruff]` config to `pyproject.toml`:
   ```toml
   [tool.ruff]
   line-length = 100
@@ -305,13 +305,13 @@ shared test fixtures. Every later phase depends on this.
   # Use TID252 (banned-api) once stable; for now document the rule in
   # reviews and rely on the test in tests/cli/test_no_direct_storage_import.py
   ```
-- [ ] Add a guard test `tests/cli/test_no_direct_storage_import.py` that
+- [x] Add a guard test `tests/cli/test_no_direct_storage_import.py` that
   greps `cli/*.py` for `from unictx.storage.*_impl` and fails if found.
-- [ ] Commit: `feat: init python project with module skeleton + ruff config`
+- [x] Commit: `feat: init python project with module skeleton + ruff config`
 
 ### Task 1.2 — `unictx/errors.py` — shared exception base
 
-- [ ] `errors.py` with single class:
+- [x] `errors.py` with single class:
   ```python
   class UnictxError(Exception):
       """Base for all uni-context domain errors.
@@ -321,28 +321,28 @@ shared test fixtures. Every later phase depends on this.
       Catch UnictxError in CLI for unified error reporting.
       """
   ```
-- [ ] No specifics here — they belong to the module that raises them.
-- [ ] Test: trivial `isinstance(SomeModuleError(), UnictxError)` smoke
+- [x] No specifics here — they belong to the module that raises them.
+- [x] Test: trivial `isinstance(SomeModuleError(), UnictxError)` smoke
   test (added in 1.3/1.4 when specifics exist).
-- [ ] Commit: `feat(errors): add UnictxError base class`
+- [x] Commit: `feat(errors): add UnictxError base class`
 
 ### Task 1.3 — `items/models.py` + `items/errors.py` — domain types
 
 Port `internal/domain/context.go` and `internal/domain/project.go`:
-- [ ] `ContextItem` as `@dataclass(slots=True)` with all fields (id,
+- [x] `ContextItem` as `@dataclass(slots=True)` with all fields (id,
   scope, kind, source, owner_user_id, title, summary, content,
   content_uri, content_mime, tags, source_meta, word_count, created_at,
   updated_at, version, ...)
-- [ ] `Scope`, `Kind`, `Source` as `StrEnum` (Python 3.11+; matches Go's
+- [x] `Scope`, `Kind`, `Source` as `StrEnum` (Python 3.11+; matches Go's
   string-backed enums)
-- [ ] `Project` dataclass (also `slots=True`)
-- [ ] `NewItemParams` + `NewContextItem` factory with
+- [x] `Project` dataclass (also `slots=True`)
+- [x] `NewItemParams` + `NewContextItem` factory with
   `validateCombination` logic
-- [ ] `ContentInlineLimit = 4 * 1024` constant
-- [ ] `countWords` function (port Go's implementation; note Minor: Go's
+- [x] `ContentInlineLimit = 4 * 1024` constant
+- [x] `countWords` function (port Go's implementation; note Minor: Go's
   undercounts CJK — preserve for parity, don't "fix" without a separate
   discussion)
-- [ ] `items/errors.py`:
+- [x] `items/errors.py`:
   ```python
   from unictx.errors import UnictxError
 
@@ -357,13 +357,13 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
           super().__init__(f"externalized content missing: {uri}")
           self.uri = uri
   ```
-- [ ] Unit tests for `validateCombination` + `NewContextItem` + error
+- [x] Unit tests for `validateCombination` + `NewContextItem` + error
   subclasses in `tests/items/test_models.py` + `tests/items/test_errors.py`
-- [ ] Commit: `feat(items): port ContextItem + Project + enums + errors`
+- [x] Commit: `feat(items): port ContextItem + Project + enums + errors`
 
 ### Task 1.4 — `config.py` — Pydantic Config + YAML loader + XDG
 
-- [ ] Pydantic v2 models mirroring Go's config schema:
+- [x] Pydantic v2 models mirroring Go's config schema:
   ```python
   from pathlib import Path
   from pydantic import BaseModel, Field, model_validator
@@ -436,35 +436,35 @@ Port `internal/domain/context.go` and `internal/domain/project.go`:
   `data_dir` has a `default_factory` so `Config.model_validate({})` works
   even when YAML omits the field. `xdg_data_home()` is the module-level
   helper that resolves `$XDG_DATA_HOME` → `~/.local/share`.
-- [ ] `load(path: Path | None) -> Config`:
+- [x] `load(path: Path | None) -> Config`:
   - Resolve path via XDG (`$XDG_CONFIG_HOME/unictx/config.yaml` →
     `~/.config/unictx/config.yaml`). Same logic as Go.
   - If file missing, return `Config(data_dir=xdg_data_home()/"unictx")`.
   - If present, `yaml.safe_load` + `Config.model_validate(data)`.
   - Pydantic raises `ValidationError` on bad shape — surface cleanly.
-- [ ] `xdg_data_home()` + `xdg_config_home()` helpers (was Go's config
+- [x] `xdg_data_home()` + `xdg_config_home()` helpers (was Go's config
   defaults).
-- [ ] Tests: missing file → defaults; minimal YAML; full YAML; invalid
+- [x] Tests: missing file → defaults; minimal YAML; full YAML; invalid
   field → ValidationError; XDG env var honored.
-- [ ] Commit: `feat(config): Pydantic Config schema + YAML loader`
+- [x] Commit: `feat(config): Pydantic Config schema + YAML loader`
 
 ### Task 1.5 — Distributed Protocols across modules
 
 Define `Protocol` interfaces in the consuming module, not a shared `port/`:
 
-- [ ] `items/repo.py` — `ContextRepo` Protocol (get/list/create/update/
+- [x] `items/repo.py` — `ContextRepo` Protocol (get/list/create/update/
   delete/reindex_fts) + `ItemFilter` dataclass
-- [ ] `search/searcher.py` — `Searcher` Protocol + `SearchHit`,
+- [x] `search/searcher.py` — `Searcher` Protocol + `SearchHit`,
   `SearchQuery`, `SearchMode` dataclasses/enums
-- [ ] `embed/embedder.py` — `Embedder` Protocol + `ModelInfo` dataclass
-- [ ] `embed/embedding_repo.py` — `EmbeddingRepo` Protocol
+- [x] `embed/embedder.py` — `Embedder` Protocol + `ModelInfo` dataclass
+- [x] `embed/embedding_repo.py` — `EmbeddingRepo` Protocol
   (`upsert_status`, `get_status`, `list_failed`, `list_for_item`) +
   `EmbeddingStatus` dataclass. **Status-only — no vector methods.**
-- [ ] `embed/model_registry.py` — `ModelRegistry` Protocol + `ModelSpec`
+- [x] `embed/model_registry.py` — `ModelRegistry` Protocol + `ModelSpec`
   dataclass
-- [ ] `storage/filestore.py` — `FileStore` Protocol (defined here because
+- [x] `storage/filestore.py` — `FileStore` Protocol (defined here because
   storage/ owns the impl too; see Module Structure note above)
-- [ ] `search/vectorstore.py` — `VectorStore` Protocol
+- [x] `search/vectorstore.py` — `VectorStore` Protocol
   (`put`, `delete`, `search`) + `VectorQuery` dataclass + `VectorHit`
   dataclass. **Mirrors Go's `port/vectorstore.go` byte-for-byte —
   Go's actual fields are the contract:** `VectorQuery` has
@@ -475,20 +475,20 @@ Define `Protocol` interfaces in the consuming module, not a shared `port/`:
   draft of this brief listed fewer fields; Go source governs per
   Global Constraints. **Owns the vec0 virtual table; this is where
   vector writes live.**
-- [ ] `pdf/extractor.py` — `PDFExtractor` Protocol
-- [ ] All as `@runtime_checkable Protocol` with method signatures
+- [x] `pdf/extractor.py` — `PDFExtractor` Protocol
+- [x] All as `@runtime_checkable Protocol` with method signatures
   matching Go's `port/*.go`. Drop `ctx context.Context` params — sync
   Python doesn't need them.
-- [ ] Add module-specific error classes raised by these interfaces:
+- [x] Add module-specific error classes raised by these interfaces:
   - `embed/errors.py`: `ModelNotFound`, `ModelConflict` (UNIQUE
     violation on slug), `EmbeddingFailed`, `StatusNotFound` (raised
     by `EmbeddingRepo.get_status` when no row matches)
   - `pdf/errors.py`: `PDFEncrypted`, `PDFExtractionFailed`,
     `PDFCommandNotFound`
   - `storage/filestore.py` raises `items/errors.py:ExternalizedContentMissing`
-- [ ] Tests: structural-typing smoke tests (a stub class satisfies each
+- [x] Tests: structural-typing smoke tests (a stub class satisfies each
   Protocol via `isinstance` check with `@runtime_checkable`).
-- [ ] Commit: `feat: define Protocol interfaces + module errors`
+- [x] Commit: `feat: define Protocol interfaces + module errors`
 
 ### Task 1.6 — `tests/conftest.py` + `tests/_fakes/` — shared fixtures
 
@@ -496,16 +496,16 @@ Stubs are load-bearing across ~30 service-layer tests (Phase 5) and
 ~20 storage tests (Phase 2-3). Build them now or every Phase 2-6 test
 re-invents them.
 
-- [ ] `tests/_fakes/fake_repo.py` — `FakeContextRepo` in-memory impl of
+- [x] `tests/_fakes/fake_repo.py` — `FakeContextRepo` in-memory impl of
   `items/repo.py:ContextRepo`. Port Go's `fake_repo_test.go` semantics
   (dict-backed, supports reindex_fts call recording).
-- [ ] `tests/_fakes/canned_filestore.py` — `CannedFileStore` impl of
+- [x] `tests/_fakes/canned_filestore.py` — `CannedFileStore` impl of
   `FileStore`. Constructor takes `dict[sha256, bytes]`; raises on
   unknown URI. Records `delete` calls for rollback verification.
-- [ ] `tests/_fakes/fake_embedder.py` — `FakeEmbedder` impl of
+- [x] `tests/_fakes/fake_embedder.py` — `FakeEmbedder` impl of
   `embed/embedder.py:Embedder`. Configurable vectors + `error_embedder`
   variant for failure tests.
-- [ ] `tests/conftest.py`:
+- [x] `tests/conftest.py`:
   ```python
   import pytest
   from tests._fakes.fake_repo import FakeContextRepo
@@ -532,9 +532,9 @@ re-invents them.
       yield db
       db.close()
   ```
-- [ ] Tests: each fake has a smoke test verifying it satisfies its
+- [x] Tests: each fake has a smoke test verifying it satisfies its
   Protocol (`isinstance(fake, SomeProtocol)`).
-- [ ] Commit: `feat(test): shared fixtures + fake stubs`
+- [x] Commit: `feat(test): shared fixtures + fake stubs`
 
 ---
 
@@ -545,71 +545,71 @@ re-invents them.
 
 ### Task 2.1 — Connection factory + extension loading
 
-- [ ] `storage/db.py` — `open_db(path, *, read_only=False)` opens
+- [x] `storage/db.py` — `open_db(path, *, read_only=False)` opens
   the connection, loads `sqlite_vec` extension, enables foreign_keys
   pragma, sets isolation_level appropriately.
-- [ ] Test: `open_db(":memory:")` + `select vec_version()` works
-- [ ] Test: `open_db(<existing Go DB>, read_only=True)` reads schema_meta
-- [ ] Commit: `feat(storage): db connection factory with sqlite-vec loading`
+- [x] Test: `open_db(":memory:")` + `select vec_version()` works
+- [x] Test: `open_db(<existing Go DB>, read_only=True)` reads schema_meta
+- [x] Commit: `feat(storage): db connection factory with sqlite-vec loading`
 
 ### Task 2.2 — Migration runner
 
 Port `internal/adapter/sqlite/migrations.go`:
-- [ ] Copy `migrations/*.sql` files verbatim from Go archive
+- [x] Copy `migrations/*.sql` files verbatim from Go archive
   (`archive/go/internal/adapter/sqlite/migrations/`) →
   `python/src/unictx/storage/migrations/`.
-- [ ] Embed via `importlib.resources` (Python equivalent of Go's `embed.FS`)
-- [ ] Parse version from filename (`NNNN_*.sql`)
-- [ ] `migrate(db)` applies pending migrations in order
-- [ ] Each migration wrapped in a transaction (Python: explicit BEGIN/COMMIT
+- [x] Embed via `importlib.resources` (Python equivalent of Go's `embed.FS`)
+- [x] Parse version from filename (`NNNN_*.sql`)
+- [x] `migrate(db)` applies pending migrations in order
+- [x] Each migration wrapped in a transaction (Python: explicit BEGIN/COMMIT
   OR `db.isolation_level=None` + manual BEGIN)
-- [ ] `wrap_migration_err` equivalent: detect "no such module: fts5"
+- [x] `wrap_migration_err` equivalent: detect "no such module: fts5"
   and emit actionable hint (Python's bundled sqlite has FTS5 by default
   but be defensive)
-- [ ] Tests: `migrate(:memory:)` applies all 4; idempotent; expected
+- [x] Tests: `migrate(:memory:)` applies all 4; idempotent; expected
   schema_version='4'
-- [ ] Commit: `feat(storage): migration runner with FTS5 error hint`
+- [x] Commit: `feat(storage): migration runner with FTS5 error hint`
 
 ### Task 2.3 — `storage/repo_impl.py` — ContextRepo impl
 
 Port `internal/adapter/sqlite/repo.go`:
-- [ ] `create(item)` — INSERT, AFTER INSERT trigger writes FTS row
-- [ ] `get(id)` — SELECT; **raise** `items/errors.py:ItemNotFound` if
+- [x] `create(item)` — INSERT, AFTER INSERT trigger writes FTS row
+- [x] `get(id)` — SELECT; **raise** `items/errors.py:ItemNotFound` if
   missing (not return, not bare `KeyError`).
-- [ ] `update(item)` — UPDATE with version increment; AFTER UPDATE
+- [x] `update(item)` — UPDATE with version increment; AFTER UPDATE
   trigger rewrites FTS row
-- [ ] `delete(id)` — DELETE; AFTER DELETE trigger removes FTS row
-- [ ] `list(filter)` — paginated with cursor (base36 ts + ":" + id format)
-- [ ] `reindex_fts(id, title, summary, content)` — direct INSERT into
+- [x] `delete(id)` — DELETE; AFTER DELETE trigger removes FTS row
+- [x] `list(filter)` — paginated with cursor (base36 ts + ":" + id format)
+- [x] `reindex_fts(id, title, summary, content)` — direct INSERT into
   context_fts, bypassing the trigger pair
-- [ ] `encode_cursor(ts, id)` / `decode_cursor(c)` — base36, byte-identical
+- [x] `encode_cursor(ts, id)` / `decode_cursor(c)` — base36, byte-identical
   to Go's `strconv.FormatInt(ts, 36)`. Spike has the verified impl.
-- [ ] `storage/row_factory.py:scan_item(cursor, row)` — JSON decode tags
+- [x] `storage/row_factory.py:scan_item(cursor, row)` — JSON decode tags
   + source_meta, handle NULL. Registered globally as `db.row_factory`
   in `storage/db.py` so every SELECT returns `ContextItem` directly.
-- [ ] Tests: roundtrip create/get/update/delete; list pagination;
+- [x] Tests: roundtrip create/get/update/delete; list pagination;
   reindex_fts for externalized; cursor format cross-checked with Go
-- [ ] Commit: `feat(storage): ContextRepo impl with base36 cursor + reindex_fts`
+- [x] Commit: `feat(storage): ContextRepo impl with base36 cursor + reindex_fts`
 
 ### Task 2.4 — `storage/searcher_impl.py` — Searcher impl
 
 Port `internal/adapter/sqlite/searcher.go`:
-- [ ] `search_fts(query)` — uses FIXED searchSQL (title-snippet only;
+- [x] `search_fts(query)` — uses FIXED searchSQL (title-snippet only;
   NO content-column snippet — see Go archive §3.2)
-- [ ] LIKE fallback for queries < 3 runes (`like_search(query)`)
-- [ ] `clamp_limit(n)` — same semantics as Go (<=0 → 20, >200 → 200,
+- [x] LIKE fallback for queries < 3 runes (`like_search(query)`)
+- [x] `clamp_limit(n)` — same semantics as Go (<=0 → 20, >200 → 200,
   else unchanged). Preserve the bug-fix from commit `4d26cea`.
-- [ ] `fts_query_string(raw)` — wrap in `"..."` with embedded quotes
+- [x] `fts_query_string(raw)` — wrap in `"..."` with embedded quotes
   doubled (FTS5 phrase query, prevents operator injection)
-- [ ] `like_pattern(raw)` — escape `%`, `_`, `\` for literal LIKE match
-- [ ] Tests: basic FTS match; CJK trigram; BM25 ranking; no match;
+- [x] `like_pattern(raw)` — escape `%`, `_`, `\` for literal LIKE match
+- [x] Tests: basic FTS match; CJK trigram; BM25 ranking; no match;
   empty query; injection safety; LIKE fallback for short queries;
   LIKE wildcard escaping; clamp limit regression
-- [ ] **Regression test (CRITICAL):** externalized content does not
+- [x] **Regression test (CRITICAL):** externalized content does not
   corrupt — port `TestSearcher_FTS_ExternalizedContentDoesNotCorrupt`
   from Go test suite. Use the same setup (ReindexFTS with content
   bypassing triggers).
-- [ ] Commit: `feat(storage): Searcher impl with FTS + LIKE fallback`
+- [x] Commit: `feat(storage): Searcher impl with FTS + LIKE fallback`
 
 ### Task 2.5 — `storage/vectorstore_impl.py`
 
@@ -618,19 +618,19 @@ table** (one per model slug + dimension: `vec_<slug>_<dim>`). This is
 where vector writes live — distinct from EmbeddingRepo (Task 2.6,
 status-only).
 
-- [ ] `put(item_id, model_slug, vector)` — DELETE+INSERT in a single
+- [x] `put(item_id, model_slug, vector)` — DELETE+INSERT in a single
   transaction (vec0 doesn't support INSERT OR REPLACE; this is the
   UPSERT idiom for virtual tables). Mirrors Go's `VectorStore.Put`.
-- [ ] `delete(item_id, model_slug)` — used when an item is removed or
+- [x] `delete(item_id, model_slug)` — used when an item is removed or
   a model is unregistered.
-- [ ] `search(vector, model_slug, limit)` — JOIN vec0 virtual table
+- [x] `search(vector, model_slug, limit)` — JOIN vec0 virtual table
   with context_item, KNN match
-- [ ] K=200 internal cap (matches Go)
-- [ ] Same clamp_limit semantics as Searcher
-- [ ] Tests: put/search roundtrip; put twice on same key replaces
+- [x] K=200 internal cap (matches Go)
+- [x] Same clamp_limit semantics as Searcher
+- [x] Tests: put/search roundtrip; put twice on same key replaces
   cleanly (no duplicate); delete removes; KNN finds embedded items;
   dimension mismatch handled; limit clamp
-- [ ] Commit: `feat(storage): VectorStore impl using sqlite-vec`
+- [x] Commit: `feat(storage): VectorStore impl using sqlite-vec`
 
 ### Task 2.6 — `storage/embedding_repo_impl.py`
 
@@ -640,7 +640,7 @@ status-only** — it does NOT write vectors. Vector writes belong to
 `embedding_status` (regular table, UPSERT-able) vs `vec_<slug>_<dim>`
 (vec0 virtual table, DELETE+INSERT in tx).
 
-- [ ] `upsert_status(item_id, model_slug, status, err_str="")` — SQL
+- [x] `upsert_status(item_id, model_slug, status, err_str="")` — SQL
   matches Go's `upsertSQL` (embedding_repo.go:29-39) byte-for-byte:
   ```sql
   INSERT INTO context_embedding
@@ -658,35 +658,35 @@ status-only** — it does NOT write vectors. Vector writes belong to
   addition) get bound to the same `err_str` for backward-compat — Go
   mirrors the same pattern. `embedded_at` value is
   `int(datetime.now(timezone.utc).timestamp())`.
-- [ ] `get_status(item_id, model_slug)` — single-row read; raises
+- [x] `get_status(item_id, model_slug)` — single-row read; raises
   `embed/errors.py:StatusNotFound` if missing.
-- [ ] `list_failed(limit)` — `WHERE status='failed' ORDER BY embedded_at
+- [x] `list_failed(limit)` — `WHERE status='failed' ORDER BY embedded_at
   DESC LIMIT ?`. Used by Worker to retry. (Sort key is `embedded_at`,
   not `updated_at` — `context_embedding` has no `updated_at` column.)
-- [ ] `list_for_item(item_id)` — all models' status rows for an item
+- [x] `list_for_item(item_id)` — all models' status rows for an item
   (drives `embed status` CLI command).
-- [ ] Cascade: when a `context_item` is deleted, FK ON DELETE CASCADE
+- [x] Cascade: when a `context_item` is deleted, FK ON DELETE CASCADE
   (migration 0002/0004) removes the status row automatically — verify
   in test, don't write a manual cascade.
-- [ ] Tests: upsert creates row; upsert same key again increments
+- [x] Tests: upsert creates row; upsert same key again increments
   `attempts` and overwrites status/last_error; get_status happy + not
   found; list_failed ordering; list_for_item returns all models;
   cascade-on-item-delete.
-- [ ] Commit: `feat(storage): EmbeddingRepo status-row impl (no vectors)`
+- [x] Commit: `feat(storage): EmbeddingRepo status-row impl (no vectors)`
 
 ### Task 2.7 — `storage/model_registry_impl.py` + `storage/schema_meta.py`
 
-- [ ] `register(spec)` — INSERT, detect UNIQUE-violation → friendly error
-- [ ] `list()` — SELECT all, ordered
-- [ ] `remove(slug)` — DELETE model + cascade via FK 0004 (or manual
+- [x] `register(spec)` — INSERT, detect UNIQUE-violation → friendly error
+- [x] `list()` — SELECT all, ordered
+- [x] `remove(slug)` — DELETE model + cascade via FK 0004 (or manual
   DELETE if cascade doesn't fire) + DROP vec0 table
-- [ ] `set_default(slug)` — transactional UPDATE
-- [ ] `scan_model(config_row)` — error class for corrupt config
-- [ ] `reconcile_plan2c_sync(db)` — idempotent self-heal on startup
-- [ ] `vec_table_name(slug, dim)` — `"vec_" + slug.replace('-', '_') + "_" + str(dim)`
-- [ ] `schema_meta.py` — `version(ctx)` queries `schema_meta` table
-- [ ] Tests: register/list/remove; default switch; shared-vec-table refusal
-- [ ] Commit: `feat(storage): ModelRegistry impl + SchemaMeta`
+- [x] `set_default(slug)` — transactional UPDATE
+- [x] `scan_model(config_row)` — error class for corrupt config
+- [x] `reconcile_plan2c_sync(db)` — idempotent self-heal on startup
+- [x] `vec_table_name(slug, dim)` — `"vec_" + slug.replace('-', '_') + "_" + str(dim)`
+- [x] `schema_meta.py` — `version(ctx)` queries `schema_meta` table
+- [x] Tests: register/list/remove; default switch; shared-vec-table refusal
+- [x] Commit: `feat(storage): ModelRegistry impl + SchemaMeta`
 
 ---
 
@@ -694,33 +694,33 @@ status-only** — it does NOT write vectors. Vector writes belong to
 
 ### Task 3.1 — `storage/filestore.py`
 
-- [ ] sha256-addressed, refcounted (single module: Protocol + impl
+- [x] sha256-addressed, refcounted (single module: Protocol + impl
   co-located, since storage/ owns both)
-- [ ] `put(content: bytes) -> str` — returns `"file://<sha256>"`
-- [ ] `get(uri: str) -> bytes`
-- [ ] `delete(uri: str)` — decrement refcount, remove file when 0
-- [ ] Path layout identical to Go: `<data_dir>/filestore/<sha256[:2]>/<sha256>`
-- [ ] Tests: put/get roundtrip; delete with refcount>0 keeps file;
+- [x] `put(content: bytes) -> str` — returns `"file://<sha256>"`
+- [x] `get(uri: str) -> bytes`
+- [x] `delete(uri: str)` — decrement refcount, remove file when 0
+- [x] Path layout identical to Go: `<data_dir>/filestore/<sha256[:2]>/<sha256>`
+- [x] Tests: put/get roundtrip; delete with refcount>0 keeps file;
   delete to 0 removes; cross-compatible with Go-written FileStore
   (read a Go-written blob, verify content)
-- [ ] Commit: `feat(storage): sha256 content-addressed file store`
+- [x] Commit: `feat(storage): sha256 content-addressed file store`
 
 ### Task 3.2 — `embed/ollama.py`
 
-- [ ] Sync httpx client
-- [ ] `embed(texts: list[str]) -> list[list[float]]` — POST to /api/embed
-- [ ] `model() -> ModelInfo`
-- [ ] 30s default timeout
-- [ ] Tests: against a mock server (use `httpx.MockTransport`); embed
+- [x] Sync httpx client
+- [x] `embed(texts: list[str]) -> list[list[float]]` — POST to /api/embed
+- [x] `model() -> ModelInfo`
+- [x] 30s default timeout
+- [x] Tests: against a mock server (use `httpx.MockTransport`); embed
   returns correct dims; model info correct
-- [ ] Commit: `feat(embed): Ollama embedder`
+- [x] Commit: `feat(embed): Ollama embedder`
 
 ### Task 3.3 — `embed/openai.py`
 
-- [ ] For LMStudio, vLLM, hosted OpenAI
-- [ ] `embed(texts)` — POST to /v1/embeddings; optional Bearer auth
-- [ ] Tests: same structure as Ollama; auth header omitted when api_key empty
-- [ ] Commit: `feat(embed): OpenAI-compatible embedder`
+- [x] For LMStudio, vLLM, hosted OpenAI
+- [x] `embed(texts)` — POST to /v1/embeddings; optional Bearer auth
+- [x] Tests: same structure as Ollama; auth header omitted when api_key empty
+- [x] Commit: `feat(embed): OpenAI-compatible embedder`
 
 ---
 
@@ -728,39 +728,39 @@ status-only** — it does NOT write vectors. Vector writes belong to
 
 ### Task 4.1 — `pdf/fitz_engine.py` (default)
 
-- [ ] Implements `pdf/extractor.py:PDFExtractor` Protocol
-- [ ] `extract(content: bytes) -> str` — open from bytes, iterate pages,
+- [x] Implements `pdf/extractor.py:PDFExtractor` Protocol
+- [x] `extract(content: bytes) -> str` — open from bytes, iterate pages,
   accumulate text
-- [ ] Encrypted PDFs raise with "encrypted pdf" in message
-- [ ] Image-only PDFs return "" (no error)
-- [ ] Tests: real PDF fixtures (copy from
+- [x] Encrypted PDFs raise with "encrypted pdf" in message
+- [x] Image-only PDFs return "" (no error)
+- [x] Tests: real PDF fixtures (copy from
   `archive/go/internal/adapter/pdf/testdata/`); encrypted; image-only;
   multi-page
-- [ ] Commit: `feat(pdf): PyMuPDF engine as default`
+- [x] Commit: `feat(pdf): PyMuPDF engine as default`
 
 ### Task 4.2 — `pdf/shell_engine.py`
 
-- [ ] subprocess wrapper
-- [ ] 30s default timeout
-- [ ] Detect "command not found" cleanly (`cmd.ProcessState == nil` equivalent)
-- [ ] Tests: working command; timeout; non-zero exit; command not found
-- [ ] Commit: `feat(pdf): shell engine for external commands`
+- [x] subprocess wrapper
+- [x] 30s default timeout
+- [x] Detect "command not found" cleanly (`cmd.ProcessState == nil` equivalent)
+- [x] Tests: working command; timeout; non-zero exit; command not found
+- [x] Commit: `feat(pdf): shell engine for external commands`
 
 ### Task 4.3 — `pdf/http_engine.py`
 
-- [ ] POST binary to a service
-- [ ] 30s default timeout; optional Bearer auth
-- [ ] Require text/plain response
-- [ ] Tests: mocked HTTP server; timeout; auth; non-200; wrong content-type
-- [ ] Commit: `feat(pdf): http engine for service-based extraction`
+- [x] POST binary to a service
+- [x] 30s default timeout; optional Bearer auth
+- [x] Require text/plain response
+- [x] Tests: mocked HTTP server; timeout; auth; non-200; wrong content-type
+- [x] Commit: `feat(pdf): http engine for service-based extraction`
 
 ### Task 4.4 — `pdf/factory.py`
 
-- [ ] `build_pdf_extractor(cfg, log)`, `build_extractor_for_engine(engine, cfg, log)`
-- [ ] `(nil, None)` equivalent: returns `(None, None)` when engine is empty
-- [ ] Per-engine validation
-- [ ] Tests: disabled → none; enabled with each engine; misconfigured → error
-- [ ] Commit: `feat(pdf): extractor factory`
+- [x] `build_pdf_extractor(cfg, log)`, `build_extractor_for_engine(engine, cfg, log)`
+- [x] `(nil, None)` equivalent: returns `(None, None)` when engine is empty
+- [x] Per-engine validation
+- [x] Tests: disabled → none; enabled with each engine; misconfigured → error
+- [x] Commit: `feat(pdf): extractor factory`
 
 ---
 
@@ -772,29 +772,29 @@ each task.
 ### Task 5.1 — `items/ingest.py` — IngestService (CRITICAL — most invariant-dense)
 
 Port `internal/service/ingest.go`:
-- [ ] Constructor: `IngestService(repo, fs, log, *opts)` — variadic via
+- [x] Constructor: `IngestService(repo, fs, log, *opts)` — variadic via
   default-None kwargs
-- [ ] `with_pdf_extractor(ext)` option (constructor-level)
-- [ ] `create(input, *create_opts) -> str` — returns item ID
-- [ ] `with_extractor(ext)` create-option (per-call)
-- [ ] **PDF branch ordering (Go archive §3.3):** PDF extraction runs
+- [x] `with_pdf_extractor(ext)` option (constructor-level)
+- [x] `create(input, *create_opts) -> str` — returns item ID
+- [x] `with_extractor(ext)` create-option (per-call)
+- [x] **PDF branch ordering (Go archive §3.3):** PDF extraction runs
   BEFORE `NewContextItem`. Load-bearing — do not reorder.
-- [ ] **Rollback contract (§3.4):** on repo.create failure, fs.delete
+- [x] **Rollback contract (§3.4):** on repo.create failure, fs.delete
   BOTH `content_uri` AND `pdf_uri` (SourceMeta["original_uri"]).
-- [ ] **Embed-skip scope (§3.5):** `pdf_uri != "" and not item.content
+- [x] **Embed-skip scope (§3.5):** `pdf_uri != "" and not item.content
   and not item.content_uri` → skip embedding.
-- [ ] Externalize if content > ContentInlineLimit (4 KB)
-- [ ] ReindexFTS after repo.create when content was externalized
-- [ ] Tests: 7 PDF tests from Go (extract + store; propagates error;
+- [x] Externalize if content > ContentInlineLimit (4 KB)
+- [x] ReindexFTS after repo.create when content was externalized
+- [x] Tests: 7 PDF tests from Go (extract + store; propagates error;
   empty extraction; rollback on repo failure; embed skip; per-call
   extractor override; ...); plus all non-PDF ingest tests
-- [ ] Commit: `feat(items): IngestService with PDF branch + rollback`
+- [x] Commit: `feat(items): IngestService with PDF branch + rollback`
 
 ### Task 5.2 — `search/service.py` — SearchService
 
-- [ ] Constructor: `SearchService(searcher, repo, embedder=None, log=...)`
-- [ ] `search(request) -> response` — mode: fts-only | hybrid
-- [ ] **Hybrid mode execution order (§3.7 clarification):**
+- [x] Constructor: `SearchService(searcher, repo, embedder=None, log=...)`
+- [x] `search(request) -> response` — mode: fts-only | hybrid
+- [x] **Hybrid mode execution order (§3.7 clarification):**
   1. Call `embedder.Embed([query])` to get the query vector. This is
      the only HTTP call in the path — wrap with `concurrent.futures`
      (`ThreadPoolExecutor(max_workers=1)` + `future.result(timeout=N)`)
@@ -806,16 +806,16 @@ Port `internal/service/ingest.go`:
      local + fast (<100ms typical). **No timeout wrapper needed**
      — they share a connection and run sequentially, not concurrently.
   3. RRF-merge the two result lists.
-- [ ] **Per-leg timeout (§3.7):** applies to the embedder.Embed call
+- [x] **Per-leg timeout (§3.7):** applies to the embedder.Embed call
   in step 1 only. NOT to SQLite queries.
-- [ ] **RRF formula (§3.8):** `Σ 1/(rank + 60)`, rank is post-filter
-- [ ] **Over-fetch (§3.9):** 3× user limit on both legs; clamp to 200
-- [ ] RRF tiebreak prefers newer items on score tie
-- [ ] Tests: fts-only basic; hybrid basic; embedder timeout degrades
+- [x] **RRF formula (§3.8):** `Σ 1/(rank + 60)`, rank is post-filter
+- [x] **Over-fetch (§3.9):** 3× user limit on both legs; clamp to 200
+- [x] RRF tiebreak prefers newer items on score tie
+- [x] Tests: fts-only basic; hybrid basic; embedder timeout degrades
   to fts-only; embedder error degrades to fts-only; SQLite error in
   one leg returns the other leg's results with warning; ranking;
   tiebreak (newer wins on score tie)
-- [ ] Commit: `feat(search): SearchService with RRF + embedder-only timeout`
+- [x] Commit: `feat(search): SearchService with RRF + embedder-only timeout`
 
 ### Task 5.3 — `embed/service.py` — EmbedService
 
@@ -830,7 +830,7 @@ id+title+content strings, not a full ContextItem. `model_slug` is
 it's not a parameter. Hydration works by calling `repo.get(item_id)`
 internally to fetch the full item (including `content_uri`).
 
-- [ ] `embed_item(item_id, title, content)` flow:
+- [x] `embed_item(item_id, title, content)` flow:
   1. `model_slug = self.embedder.Model().slug` (derived, not parameter)
   2. If `content` empty, hydrate via `_hydrate_content(item_id)`:
      - `item = repo.get(item_id)` — fetches full ContextItem
@@ -852,44 +852,44 @@ internally to fetch the full item (including `content_uri`).
      `repo.update(item)`. Flag-write failure is non-fatal: status stays
      'done' (vec row is the source of truth for "embedded"), warning
      logged.
-- [ ] Status always written on every path (success → 'done', failure →
+- [x] Status always written on every path (success → 'done', failure →
   'failed' + last_error + attempts++). Vector only written on success.
-- [ ] Tests: happy path (vector + status='done' + any_embedding=1);
+- [x] Tests: happy path (vector + status='done' + any_embedding=1);
   empty content after hydration (status='failed', no vector, error
   raised); embedder failure (status='failed', no vector); VectorStore
   failure (status='failed', no flag flip); any_embedding flag-write
   failure (status stays 'done', warning logged, no error raised);
   model_slug comes from embedder not parameter
-- [ ] Commit: `feat(embed): EmbedService with split vector/status writes`
+- [x] Commit: `feat(embed): EmbedService with split vector/status writes`
 
 ### Task 5.4 — `embed/worker.py` + `embed/backfill.py` + `embed/reembed.py`
 
-- [ ] `WorkerService.run(interval)` — poll loop with pre-iteration
+- [x] `WorkerService.run(interval)` — poll loop with pre-iteration
   cancellation check (§3.10)
-- [ ] `BackfillService.run(limit, dry_run)` — bulk embed missing
-- [ ] `ReembedService.run(model, limit, dry_run)` — re-embed under
+- [x] `BackfillService.run(limit, dry_run)` — bulk embed missing
+- [x] `ReembedService.run(model, limit, dry_run)` — re-embed under
   different model
-- [ ] All three: warn-and-continue on per-item failure
-- [ ] Tests: worker iteration; backfill with various filters; reembed
+- [x] All three: warn-and-continue on per-item failure
+- [x] Tests: worker iteration; backfill with various filters; reembed
   against different model
-- [ ] Commit: `feat(embed): Worker/Backfill/Reembed async embed runners`
+- [x] Commit: `feat(embed): Worker/Backfill/Reembed async embed runners`
 
 ### Task 5.5 — `items/reindex_fts.py` — ReindexFTSService
 
-- [ ] `run(limit, dry_run)` — walks items, hydrates externalized content
+- [x] `run(limit, dry_run)` — walks items, hydrates externalized content
   from FileStore, calls repo.reindex_fts
-- [ ] Idempotent (ReindexFTS uses delete-then-insert)
-- [ ] Tests: bulk reindex; dry run; per-item failure continues
-- [ ] Commit: `feat(items): ReindexFTSService bulk runner`
+- [x] Idempotent (ReindexFTS uses delete-then-insert)
+- [x] Tests: bulk reindex; dry run; per-item failure continues
+- [x] Commit: `feat(items): ReindexFTSService bulk runner`
 
 ### Task 5.6 — `items/item_service.py` + `embed/model_service.py` + `embed/diagnostic.py`
 
-- [ ] `ItemService` (get/list/delete) with FileStore hydration in get
-- [ ] `DiagnosticService` (schema_version, ping_embedder)
-- [ ] `ModelService` (add/list/remove/switch/status)
-- [ ] Tests: get hydrates externalized; doctor reports correctly;
+- [x] `ItemService` (get/list/delete) with FileStore hydration in get
+- [x] `DiagnosticService` (schema_version, ping_embedder)
+- [x] `ModelService` (add/list/remove/switch/status)
+- [x] Tests: get hydrates externalized; doctor reports correctly;
   model lifecycle
-- [ ] Commit: `feat: Item/Model/Diagnostic services`
+- [x] Commit: `feat: Item/Model/Diagnostic services`
 
 ---
 
@@ -897,13 +897,13 @@ internally to fetch the full item (including `content_uri`).
 
 ### Task 6.1 — Typer app skeleton + global flags + wiring + output helper
 
-- [ ] `cli/app.py` — main `typer.Typer()`
-- [ ] Global flags: `--config`, `--json`, `--verbose`
-- [ ] Config loading via `unictx.config.load(path)`
-- [ ] App wiring: `wire(cfg)` returns a container with all services
+- [x] `cli/app.py` — main `typer.Typer()`
+- [x] Global flags: `--config`, `--json`, `--verbose`
+- [x] Config loading via `unictx.config.load(path)`
+- [x] App wiring: `wire(cfg)` returns a container with all services
   (the only place that imports `storage/*_impl.py` directly — everything
   else goes through service Protocols)
-- [ ] `cli/output.py:print_json(result)` — single-purpose JSON helper,
+- [x] `cli/output.py:print_json(result)` — single-purpose JSON helper,
   mirrors Go's `printJSON(v)` (output.go). NOT a branching `format_result`
   — non-JSON output is rendered per-command with rich tables.
   ```python
@@ -931,44 +931,44 @@ internally to fetch the full item (including `content_uri`).
   ```
   Each subcommand does: `if json_mode: print_json(result); else:
   <rich table or plain print>`.
-- [ ] Commit: `feat(cli): typer skeleton with global flags + wiring + output`
+- [x] Commit: `feat(cli): typer skeleton with global flags + wiring + output`
 
 ### Task 6.2 — `cli/user_note.py` — `user note` subcommands
 
-- [ ] `add` (with `--file`, `--title`, `--tags`, `--engine`)
-- [ ] `get <id>` (with FileStore hydration)
-- [ ] `list` (paginated, with `--scope`, `--kind`, `--tags`)
-- [ ] `delete <id>`
-- [ ] `--json` output format across all subcommands
-- [ ] Reset state between pytest cases via fixture (Go archive §5.7)
-- [ ] Tests: integration tests for each subcommand; flag parsing;
+- [x] `add` (with `--file`, `--title`, `--tags`, `--engine`)
+- [x] `get <id>` (with FileStore hydration)
+- [x] `list` (paginated, with `--scope`, `--kind`, `--tags`)
+- [x] `delete <id>`
+- [x] `--json` output format across all subcommands
+- [x] Reset state between pytest cases via fixture (Go archive §5.7)
+- [x] Tests: integration tests for each subcommand; flag parsing;
   file import; PDF with engine override
-- [ ] Commit: `feat(cli): user note subcommands with --file and --engine`
+- [x] Commit: `feat(cli): user note subcommands with --file and --engine`
 
 ### Task 6.3 — `cli/search.py` — `search` command
 
-- [ ] `search <query>` with `--mode`, `--limit`, `--scope`, `--kind`
-- [ ] LIKE fallback transparent (no user-visible difference)
-- [ ] Tests: fts-only search; hybrid search; limit clamp; filters
-- [ ] Commit: `feat(cli): search command with fts/hybrid modes`
+- [x] `search <query>` with `--mode`, `--limit`, `--scope`, `--kind`
+- [x] LIKE fallback transparent (no user-visible difference)
+- [x] Tests: fts-only search; hybrid search; limit clamp; filters
+- [x] Commit: `feat(cli): search command with fts/hybrid modes`
 
 ### Task 6.4 — `cli/embed_cmd.py` — `embed` subcommands
 
-- [ ] `embed model list|add|remove|switch`
-- [ ] `embed status`
-- [ ] `embed backfill [--limit] [--dry-run]`
-- [ ] `embed worker [--interval]`
-- [ ] `embed reembed --model X`
-- [ ] Tests: each subcommand; switch warning; reembed signal handling
-- [ ] Commit: `feat(cli): embed model + worker + backfill commands`
+- [x] `embed model list|add|remove|switch`
+- [x] `embed status`
+- [x] `embed backfill [--limit] [--dry-run]`
+- [x] `embed worker [--interval]`
+- [x] `embed reembed --model X`
+- [x] Tests: each subcommand; switch warning; reembed signal handling
+- [x] Commit: `feat(cli): embed model + worker + backfill commands`
 
 ### Task 6.5 — `cli/doctor.py` + `cli/reindex_fts_cmd.py`
 
-- [ ] `doctor` — schema_version + ping embedder
-- [ ] `reindex-fts [--limit] [--dry-run]`
-- [ ] Tests: doctor disabled embedder; doctor enabled + reachable;
+- [x] `doctor` — schema_version + ping embedder
+- [x] `reindex-fts [--limit] [--dry-run]`
+- [x] Tests: doctor disabled embedder; doctor enabled + reachable;
   reindex-fts output
-- [ ] Commit: `feat(cli): doctor and reindex-fts commands`
+- [x] Commit: `feat(cli): doctor and reindex-fts commands`
 
 ---
 
@@ -977,13 +977,13 @@ internally to fetch the full item (including `content_uri`).
 Port remaining Go tests not yet ported in earlier phases. Estimated
 ~50 test cases across all modules. Stubs from Task 1.6 are available.
 
-- [ ] Service-layer tests using `FakeContextRepo` / `CannedFileStore` /
+- [x] Service-layer tests using `FakeContextRepo` / `CannedFileStore` /
   `FakeEmbedder` from `tests/_fakes/`.
-- [ ] CLI integration tests (`typer.testing.CliRunner` pattern)
-- [ ] Edge-case tests: concurrent model register race (Go §5.6); empty
+- [x] CLI integration tests (`typer.testing.CliRunner` pattern)
+- [x] Edge-case tests: concurrent model register race (Go §5.6); empty
   extraction; encrypted PDF; image-only PDF; size cap boundary
-- [ ] Migration test: idempotency on fresh + migrated DB
-- [ ] Commit per module or per major test group
+- [x] Migration test: idempotency on fresh + migrated DB
+- [x] Commit per module or per major test group
 
 ---
 
@@ -991,10 +991,10 @@ Port remaining Go tests not yet ported in earlier phases. Estimated
 
 ### Task 8.1 — Read-only verification on existing Go DB
 
-- [ ] Run Python CLI against existing Go DB (read-only)
-- [ ] Verify each command produces equivalent output to Go binary
-- [ ] Document any output format differences (intentional changes only)
-- [ ] Commit: `docs: parity verification report`
+- [x] Run Python CLI against existing Go DB (read-only)
+- [x] Verify each command produces equivalent output to Go binary
+- [x] Document any output format differences (intentional changes only)
+- [x] Commit: `docs: parity verification report`
 
 ### Task 8.2 — Backup + cutover
 
