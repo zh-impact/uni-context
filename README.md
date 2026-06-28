@@ -71,7 +71,7 @@ See:
 
 See "Motivation" section of the migration plan. Summary:
 
-1. **PDF library ecosystem** — Go's `gxpdf` was the only勉强-usable
+1. **PDF library ecosystem** — Go's `gxpdf` was the only Barely-usable
    option; Python has PyMuPDF (fast, AES-256-capable) plus many others.
 2. **Future web/agent layer** — Python ecosystem dominates agent frameworks.
 3. **Iterate faster** — REPL + hot reload > Go compile cycle.
