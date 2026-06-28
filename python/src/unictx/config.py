@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -100,6 +101,12 @@ class EmbedderConfig(BaseModel):
         if self.base_url == "":
             self.base_url = {
                 "ollama": "http://localhost:11434",
+                # Go config.go:112 uses `case "openai"`; the Python cfg
+                # binding historically uses `"openai-compat"` as an alias
+                # for the same provider. Accept both spellings so an
+                # existing Go config with `provider: openai` keeps its
+                # default base_url after migration.
+                "openai": "http://localhost:1234/v1",
                 "openai-compat": "http://localhost:1234/v1",
             }.get(self.provider, "")
         if self.model == "":
@@ -170,14 +177,19 @@ class Config(BaseModel):
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
 
-    @model_validator(mode="after")
-    def coalesce_empty_data_dir(self) -> Config:
-        # Pydantic's Path validator materializes both `""` and `"."` as
-        # `Path(".")`. Treat both as empty to keep parity with Go's
-        # `cfg.DataDir == ""` check (the brief's verbatim quote).
-        if str(self.data_dir) in {"", "."}:
-            self.data_dir = xdg_data_home() / "unictx"
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def coalesce_empty_data_dir(cls, data: Any) -> Any:
+        # Coalesce the empty string at validation time, BEFORE Pydantic
+        # runs its Path coercion. Mirrors Go config.go:95-97 verbatim:
+        # `if cfg.DataDir == "" { cfg.DataDir = defaultDataDir() }`. The
+        # distinction matters: Pydantic v2's Path validator materializes
+        # both `""` and `"."` as `Path(".")`, so an after-validator
+        # cannot tell them apart and would silently rewrite a user's
+        # explicit `data_dir: "."` (CWD) to the XDG default.
+        if isinstance(data, dict) and data.get("data_dir") == "":
+            data["data_dir"] = str(xdg_data_home() / "unictx")
+        return data
 
 
 def load(path: Path | None = None) -> Config:

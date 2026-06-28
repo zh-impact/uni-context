@@ -252,6 +252,52 @@ def test_config_data_dir_default_uses_xdg_data_home(monkeypatch, tmp_path: Path)
     assert cfg.data_dir == tmp_path / "unictx"
 
 
+def test_config_explicit_dot_data_dir_is_preserved(monkeypatch, tmp_path: Path):
+    """`data_dir: "."` is the user's explicit choice of CWD and must
+    NOT be rewritten to the XDG default.
+
+    Mirrors Go config.go:95 `if cfg.DataDir == ""` — only the empty
+    string triggers coalescing. Pydantic's Path coercion materializes
+    both `""` and `"."` as `Path(".")`, so the validator must check
+    for empty string BEFORE coercion to distinguish them.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    cfg = Config(data_dir=".")
+    assert str(cfg.data_dir) == ".", (
+        "explicit '.' must be preserved as the user's choice of CWD; "
+        f"got {cfg.data_dir!r}"
+    )
+
+
+def test_config_empty_string_data_dir_coalesces_to_xdg_default(
+    monkeypatch, tmp_path: Path
+):
+    """`data_dir: ""` → XDG default. Mirrors Go config.go:95-97."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    cfg = Config(data_dir="")
+    assert cfg.data_dir == tmp_path / "unictx"
+
+
+def test_embedder_openai_provider_gets_default_base_url():
+    """provider: "openai" → base_url defaults to http://localhost:1234/v1.
+
+    Go config.go:112 uses `case "openai"` (not "openai-compat"). Existing
+    Go configs that say `provider: openai` must continue to get the
+    default on the Python side; without it, wire() builds an embedder
+    with base_url="" that cannot make requests.
+    """
+    cfg = EmbedderConfig(enabled=True, provider="openai")
+    assert cfg.base_url == "http://localhost:1234/v1"
+
+
+def test_embedder_openai_compat_provider_also_gets_default_base_url():
+    """provider: "openai-compat" → same default base_url. The Python
+    cfg binding uses "openai-compat" as an alias for "openai"; both
+    spellings produce the same default."""
+    cfg = EmbedderConfig(enabled=True, provider="openai-compat")
+    assert cfg.base_url == "http://localhost:1234/v1"
+
+
 # ---------------------------------------------------------------------------
 # EmbedderConfig — defaults gated on `enabled`
 # ---------------------------------------------------------------------------

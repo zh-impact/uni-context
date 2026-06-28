@@ -31,10 +31,13 @@ Tiebreak: on score tie, the item with the lexically-larger id wins
 
 Adaptations vs Go (per Plan §Python Conventions):
   - ctx dropped (Python is sync).
-  - Go's ``context.WithTimeout`` per leg dropped (Python is sync; the
-    embed call is bounded by ``httpx.Client.timeout``, the SQLite legs
-    are local). The ``leg_timeout`` field is retained for forward-compat
-    but unused on the SQLite path; embed timeout comes from the embedder.
+  - Go's ``context.WithTimeout`` per leg reproduced via
+    :class:`concurrent.futures.ThreadPoolExecutor` +
+    :meth:`Future.result(timeout=...)`. The boundary fires when either
+    SQLite leg (FTS or KNN) runs longer than ``leg_timeout`` (default
+    5s), preventing a wedged vec0 table or FTS5 tokenizer spin from
+    freezing the CLI. The hanging leg is abandoned and the per-leg
+    fallback path warns + continues with the other leg.
   - ``log`` defaults to ``sys.stderr``; tests pass ``StringIO``.
 """
 
@@ -42,8 +45,11 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
-from typing import IO
+from typing import IO, Callable, TypeVar
+
+_T = TypeVar("_T")
 
 from unictx.embed.embedder import Embedder
 from unictx.items.models import ContextItem, Kind, Scope
@@ -65,8 +71,10 @@ __all__ = [
 # score(d) = Σ 1/(rank_i + RRF_K).
 RRF_K = 60
 
-# Default per-leg timeout when leg_timeout is None. Currently unused on
-# the SQLite path (queries are local), retained for forward-compat.
+# Default per-leg timeout when leg_timeout is None. Mirrors Go's
+# `legTimeoutOrDefault` (search.go) — local SQLite queries usually finish
+# in <100ms, but a corrupted vec0 table or FTS5 tokenizer can spin, and
+# the boundary prevents a wedged leg from freezing the CLI.
 _DEFAULT_LEG_TIMEOUT = 5.0
 
 
@@ -273,28 +281,36 @@ class SearchService:
             )
             return self._search_fts_only(request)
 
-        # Step 2: SQLite legs. Local + fast, no timeout wrapper.
-        # On per-leg failure: warn + continue with the other leg.
+        # Step 2: SQLite legs. Local + fast usually, but wrap each in
+        # the per-leg timeout so a wedged vec0 table or FTS5 tokenizer
+        # spin cannot freeze the CLI. On timeout or any other failure:
+        # warn + continue with the other leg's results.
         try:
-            v_hits = self._searcher.search_vector(
-                VectorQuery(
-                    vector=query_vectors[0],
-                    model=self._embedder.model().slug,  # type: ignore[union-attr]
-                    limit=over_fetch,
-                    scopes=[str(s) for s in request.scopes],
-                    kinds=[str(k) for k in request.kinds],
-                )
+            v_hits = self._run_leg_with_timeout(
+                "vector",
+                lambda: self._searcher.search_vector(
+                    VectorQuery(
+                        vector=query_vectors[0],
+                        model=self._embedder.model().slug,  # type: ignore[union-attr]
+                        limit=over_fetch,
+                        scopes=[str(s) for s in request.scopes],
+                        kinds=[str(k) for k in request.kinds],
+                    )
+                ),
             )
         except Exception as exc:
             self._warn(
-                f"warn: hybrid search vector lookup failed, "
-                f"falling back to fts-only: {exc}\n"
+                f"warn: hybrid search vector lookup failed "
+                f"(timeout or error), falling back to fts-only: {exc}\n"
             )
             return self._search_fts_only(request)
 
         try:
-            f_hits = self._searcher.search_fts(
-                SearchQuery(query=request.query, limit=over_fetch)
+            f_hits = self._run_leg_with_timeout(
+                "fts",
+                lambda: self._searcher.search_fts(
+                    SearchQuery(query=request.query, limit=over_fetch)
+                ),
             )
         except Exception as exc:
             # Symmetric with the vector-failure path: warn + proceed
@@ -303,8 +319,8 @@ class SearchService:
             # vector loop still scores its hits, and the final trim to
             # limit returns them as matched_by=["vector"]-only.
             self._warn(
-                f"warn: hybrid search fts failed, "
-                f"continuing with vector-only results: {exc}\n"
+                f"warn: hybrid search fts failed "
+                f"(timeout or error), continuing with vector-only results: {exc}\n"
             )
             f_hits = []
 
@@ -390,6 +406,29 @@ class SearchService:
         if len(out) > limit:
             out = out[:limit]
         return SearchResponse(results=out, total=len(out))
+
+    def _run_leg_with_timeout(self, leg_name: str, fn: Callable[[], _T]) -> _T:
+        """Run a hybrid leg (FTS or vector) with a hard timeout.
+
+        Mirrors Go's ``context.WithTimeout(ctx, s.legTimeoutOrDefault())``
+        per leg (search.go:241, 252). Python is sync, so we run the leg
+        in a one-worker :class:`ThreadPoolExecutor` and bound its result
+        with :meth:`Future.result(timeout=...)`. On timeout the executor
+        is shut down without waiting — the worker thread is left to
+        finish (or hang) on its own; we just stop blocking on it.
+
+        Raises ``TimeoutError`` on timeout; re-raises any exception the
+        leg itself raised. The hybrid path's existing per-leg fallbacks
+        catch both.
+        """
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(fn)
+            try:
+                return future.result(timeout=self._leg_timeout)
+            except FuturesTimeoutError as exc:
+                raise TimeoutError(
+                    f"{leg_name} leg exceeded {self._leg_timeout}s timeout"
+                ) from exc
 
     # ---- helpers -----------------------------------------------------
 

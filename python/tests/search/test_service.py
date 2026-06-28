@@ -12,6 +12,7 @@ the rest. The StringIO log captures warn-and-continue messages.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from io import StringIO
 
@@ -33,13 +34,18 @@ from unictx.search.vectorstore import VectorHit, VectorQuery
 # ---------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass
 class StubSearcher:
     """Controllable Searcher for tests.
 
     Each attribute is a list of hits to return on the next call.
     ``fts_err`` / ``vec_err`` inject failures to exercise the
     warn-and-continue paths.
+
+    Note: deliberately NOT ``slots=True`` so per-test method overrides
+    (``searcher.search_vector = hanging_vec``) work for the per-leg
+    timeout tests. Other tests in this file mutate fields directly,
+    which slots would also disallow.
     """
 
     fts_hits: list[SearchHit] = field(default_factory=list)
@@ -82,11 +88,14 @@ def _fixture(
     *,
     embedder=None,
     searcher: StubSearcher | None = None,
+    leg_timeout: float | None = None,
 ) -> tuple[SearchService, FakeContextRepo, StubSearcher, StringIO]:
     repo = FakeContextRepo()
     searcher = searcher if searcher is not None else StubSearcher()
     log = StringIO()
-    svc = SearchService(searcher, repo, log=log, embedder=embedder)
+    svc = SearchService(
+        searcher, repo, log=log, embedder=embedder, leg_timeout=leg_timeout
+    )
     return svc, repo, searcher, log
 
 
@@ -339,6 +348,75 @@ def test_hybrid_fts_failure_continues_with_vector_only() -> None:
     assert len(response.results) == 1
     assert response.results[0].matched_by == ["vector"]
     assert "fts failed" in log.getvalue()
+
+
+def test_hybrid_per_leg_timeout_prevents_vector_hang() -> None:
+    """Vector leg exceeding leg_timeout → abandoned, falls back to fts-only.
+
+    Mirrors Go's TestSearchService_Hybrid_PerLegTimeoutPreventsVecHang
+    (search_hybrid_test.go:449). The hung vector leg is cancelled after
+    `leg_timeout`; the existing per-leg fallback path fires (warn +
+    return fts-only results). Without the timeout boundary, a wedged
+    leg would freeze the CLI.
+    """
+    searcher = StubSearcher(
+        fts_hits=[SearchHit(id="a", score=1.0)],
+    )
+
+    def hanging_vec(q: VectorQuery) -> list[VectorHit]:
+        time.sleep(1.0)  # simulates vec0 corruption / FTS5 tokenizer spin
+        return []
+
+    searcher.search_vector = hanging_vec  # type: ignore[method-assign]
+
+    svc, repo, _, log = _fixture(
+        embedder=FakeEmbedder(),
+        searcher=searcher,
+        leg_timeout=0.1,
+    )
+    repo.items["a"] = _item("a")
+
+    response = svc.search(SearchRequest(query="x", mode=SearchMode.HYBRID))
+
+    assert len(response.results) == 1
+    assert response.results[0].matched_by == ["fts"]
+    log_text = log.getvalue().lower()
+    assert "vector" in log_text and "timeout" in log_text, (
+        f"timeout warning should mention vector + timeout; got: {log.getvalue()!r}"
+    )
+
+
+def test_hybrid_per_leg_timeout_prevents_fts_hang() -> None:
+    """FTS leg exceeding leg_timeout → abandoned, returns vector-only results.
+
+    Mirrors Go's TestSearchService_Hybrid_PerLegTimeoutPreventsFTSHang
+    (search_hybrid_test.go:493). Symmetric with the vector-hang case.
+    """
+    searcher = StubSearcher(
+        vec_hits=[VectorHit(id="a", score=0.9)],
+    )
+
+    def hanging_fts(q: SearchQuery) -> list[SearchHit]:
+        time.sleep(1.0)
+        return []
+
+    searcher.search_fts = hanging_fts  # type: ignore[method-assign]
+
+    svc, repo, _, log = _fixture(
+        embedder=FakeEmbedder(),
+        searcher=searcher,
+        leg_timeout=0.1,
+    )
+    repo.items["a"] = _item("a", title="alpha")
+
+    response = svc.search(SearchRequest(query="x", mode=SearchMode.HYBRID))
+
+    assert len(response.results) == 1
+    assert response.results[0].matched_by == ["vector"]
+    log_text = log.getvalue().lower()
+    assert "fts" in log_text and "timeout" in log_text, (
+        f"timeout warning should mention fts + timeout; got: {log.getvalue()!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
