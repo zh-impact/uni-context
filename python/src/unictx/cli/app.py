@@ -19,10 +19,7 @@ Plan §Task 6.1. Three concerns live here:
    this container (loaded once per invocation via ``wire(load_config())``).
 
 Deferred to later phases:
-  - ``reconcile_plan2c_sync`` (Plan 2c self-heal) — the storage layer
-    explicitly defers this to the wire layer. Tracked for a later task;
-    6.1 makes embedder.enabled=True require a registered active model
-    (Go-faithful: Wire fails loudly on missing row, app.go:136-140).
+  - (none currently; Plan 2c self-heal landed — see :func:`_reconcile_model`.)
 """
 
 from __future__ import annotations
@@ -39,6 +36,8 @@ from unictx.config import Config, EmbedderConfig
 from unictx.embed.backfill import BackfillService
 from unictx.embed.diagnostic import DiagnosticService
 from unictx.embed.embedder import Embedder, ModelInfo
+from unictx.embed.errors import ModelConflict, ModelNotFound
+from unictx.embed.model_registry import ModelSpec
 from unictx.embed.model_service import ModelService
 from unictx.embed.reembed import ReembedService
 from unictx.embed.service import EmbedService
@@ -114,6 +113,66 @@ class AppContainer:
 # ---------------------------------------------------------------------------
 
 
+def _reconcile_model(
+    registry: ModelRegistryImpl,
+    emb_cfg: EmbedderConfig,
+    *,
+    log: IO[str] | None = None,
+) -> None:
+    """Plan 2c self-heal: ensure the cfg-driven model is registered.
+
+    When ``embedder.enabled=True``, the user expects the model named in
+    ``emb_cfg.model`` to be usable without first running ``embed model add``.
+    Reconcile makes that work:
+
+    1. If a row with ``slug == emb_cfg.model`` already exists → no-op.
+    2. Otherwise register one from the cfg fields. A lost INSERT race
+       (another caller registered between our pre-check and INSERT) is
+       swallowed; the existing row wins.
+    3. After (2), if no default exists anywhere, set the cfg model as
+       default. **Does not** override an existing default — user intent
+       from a prior ``embed switch`` is preserved. Use ``embed switch``
+       to change defaults.
+
+    Idempotent: re-running with the same cfg is a no-op once the model
+    exists. Safe to call on every wire().
+    """
+    if not emb_cfg.model:
+        return  # defensive; apply_defaults fills model when enabled
+
+    try:
+        registry.get(emb_cfg.model)
+        return  # already registered
+    except ModelNotFound:
+        pass
+
+    spec = ModelSpec(
+        slug=emb_cfg.model,
+        provider=emb_cfg.provider,
+        base_url=emb_cfg.base_url,
+        api_key=emb_cfg.api_key,
+        dimension=emb_cfg.dimension,
+    )
+    try:
+        registry.register(spec)
+    except ModelConflict:
+        # Race: another wire() beat us to it. The existing row wins.
+        if log is not None:
+            with contextlib.suppress(Exception):
+                print(
+                    f"reconcile: lost race registering {emb_cfg.model!r}; "
+                    "using existing row",
+                    file=log,
+                )
+        return
+
+    # If no default exists anywhere, set the cfg model as default.
+    try:
+        registry.get_active()
+    except ModelNotFound:
+        registry.set_default(emb_cfg.model)
+
+
 def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
     """Build the AppContainer from a Config.
 
@@ -131,10 +190,10 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
       - Builds a PDF extractor unconditionally — ``build_pdf_extractor``
         returns ``None`` when PDF is unconfigured, and ``IngestService``
         errors only if a PDF is actually passed.
-      - If ``cfg.embedder.enabled``: tries ``registry.get_active()`` and
-        raises :class:`unictx.embed.errors.ModelNotFound` if no active
-        model row exists. Reconcile logic (auto-register from cfg fields)
-        is deferred to a later task per the plan.
+      - If ``cfg.embedder.enabled``: runs :func:`_reconcile_model`
+        (Plan 2c self-heal) so the cfg-driven model is registered, then
+        resolves the active model. Reconcile is idempotent and never
+        overrides a user-chosen default.
     """
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = cfg.data_dir / "unictx.db"
@@ -168,9 +227,9 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
         reembed: ReembedService | None = None
 
         if cfg.embedder.enabled:
-            # Go: app.go:136-140 — GetActive is unconditional; missing row
-            # is a hard failure. Reconcile (auto-register from cfg.Embedder
-            # fields) is deferred to a later task per the plan.
+            # Plan 2c self-heal: register the cfg-driven model if it's
+            # missing. Idempotent; never overrides a user-chosen default.
+            _reconcile_model(registry, cfg.embedder, log=log)
             active = registry.get_active()
             embedder = _build_embedder_from_active(cfg.embedder, active)
 
@@ -235,7 +294,11 @@ def _build_embedder_from_active(
             model=active.slug,
             dimension=active.dimension,
         )
-    if active.provider == "openai":
+    if active.provider in ("openai", "openai-compat"):
+        # cfg uses "openai-compat" as the canonical key (see EmbedderConfig
+        # binding-parity note); DB rows historically use "openai". Accept
+        # both so reconcile-registered rows (which inherit cfg's provider
+        # spelling) build the same Embedder as manually-registered ones.
         from unictx.embed.openai import OpenAIEmbedder
 
         return OpenAIEmbedder(

@@ -102,29 +102,175 @@ def test_wire_close_releases_db(tmp_path: Path) -> None:
         container.db.execute("SELECT 1").fetchone()
 
 
-def test_wire_enabled_embedder_without_active_model_raises(
+def test_wire_reconcile_registers_cfg_model_when_missing(
     tmp_path: Path,
 ) -> None:
-    """embedder.enabled=True but no active model registered → ModelNotFound.
+    """embedder.enabled=True + cfg.model not in registry → wire()
+    auto-registers it (Plan 2c self-heal).
 
-    Mirrors Go's Wire (app.go:136-140): GetActive is unconditional when
-    enabled, and a missing active row is a hard failure. Reconcile logic
-    (auto-register from cfg.Embedder fields) is deferred to a later task
-    per the plan; for 6.1, the user must run `embed model add` first.
-
-    Note: migration 0002 seeds a default ``bge-m3`` row, so we wipe it
-    explicitly to exercise the empty-registry branch.
+    Without reconcile, this scenario raised ModelNotFound and the user
+    had to run `embed model add` first. With reconcile, the cfg-driven
+    model is registered automatically, including being set as default
+    (no other default existed).
     """
-    # Phase 1: wire disabled + wipe the seeded default model.
+    # Phase 1: wire disabled + wipe the seeded default model so the
+    # registry is empty before reconcile runs.
     setup_cfg = Config(data_dir=tmp_path, embedder=EmbedderConfig(enabled=False))
     setup_container = wire(setup_cfg)
     setup_container.db.execute("DELETE FROM embedding_model")
     setup_container.close()
 
-    # Phase 2: enable embedder; registry.get_active now raises.
-    cfg = Config(data_dir=tmp_path, embedder=EmbedderConfig(enabled=True))
-    with pytest.raises(ModelNotFound):
-        wire(cfg)
+    # Phase 2: enable embedder with a custom model in cfg.
+    cfg = Config(
+        data_dir=tmp_path,
+        embedder=EmbedderConfig(
+            enabled=True,
+            provider="openai-compat",
+            model="custom-foo",
+            dimension=1024,
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+        ),
+    )
+    container = wire(cfg)
+    try:
+        # The custom model was registered + set as default.
+        row = container.db.execute(
+            "SELECT slug, is_default FROM embedding_model WHERE slug = ?",
+            ("custom-foo",),
+        ).fetchone()
+        assert row is not None, "reconcile should have registered 'custom-foo'"
+        assert row[1] == 1, "reconcile should set custom-foo as default"
+    finally:
+        container.close()
+
+
+def test_wire_reconcile_idempotent(tmp_path: Path) -> None:
+    """Calling wire() twice with the same cfg → second call no-ops.
+
+    The second wire() finds the model already registered and skips the
+    INSERT (otherwise it would ModelConflict). No default flip either.
+    """
+    # Wipe the seed so reconcile has work to do on the first wire.
+    setup_cfg = Config(data_dir=tmp_path, embedder=EmbedderConfig(enabled=False))
+    setup_container = wire(setup_cfg)
+    setup_container.db.execute("DELETE FROM embedding_model")
+    setup_container.close()
+
+    cfg = Config(
+        data_dir=tmp_path,
+        embedder=EmbedderConfig(
+            enabled=True,
+            provider="openai-compat",
+            model="custom-foo",
+            dimension=1024,
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+        ),
+    )
+    c1 = wire(cfg)
+    c1.close()
+    c2 = wire(cfg)
+    try:
+        rows = c2.db.execute(
+            "SELECT slug FROM embedding_model WHERE slug = 'custom-foo'"
+        ).fetchall()
+        assert len(rows) == 1, "second wire() must not duplicate the row"
+    finally:
+        c2.close()
+
+
+def test_wire_reconcile_skips_when_model_exists(tmp_path: Path) -> None:
+    """If the cfg model is already registered, reconcile is a no-op.
+
+    Pre-register 'custom-foo' with one set of fields; wire() with
+    cfg.model='custom-foo' must NOT overwrite the existing row.
+    """
+    # Pre-register custom-foo directly via SQL with sentinel api_key.
+    setup_cfg = Config(data_dir=tmp_path, embedder=EmbedderConfig(enabled=False))
+    setup_container = wire(setup_cfg)
+    setup_container.db.execute("DELETE FROM embedding_model")
+    setup_container.db.execute(
+        "INSERT INTO embedding_model "
+        "(slug, name, provider, dimension, vec_table, is_default, status, config, created_at) "
+        "VALUES ('custom-foo', 'custom-foo', 'openai-compat', 1024, 'vec_custom_foo_1024', "
+        "1, 'active', '{\"api_key\":\"SENTINEL\"}', strftime('s','now'))"
+    )
+    setup_container.close()
+
+    cfg = Config(
+        data_dir=tmp_path,
+        embedder=EmbedderConfig(
+            enabled=True,
+            provider="openai-compat",
+            model="custom-foo",
+            dimension=1024,
+            base_url="http://localhost:1234/v1",
+            api_key="sk-different",
+        ),
+    )
+    container = wire(cfg)
+    try:
+        row = container.db.execute(
+            "SELECT config FROM embedding_model WHERE slug = 'custom-foo'"
+        ).fetchone()
+        assert row is not None
+        assert "SENTINEL" in row[0], "existing row must not be overwritten"
+        assert "sk-different" not in row[0]
+    finally:
+        container.close()
+
+
+def test_wire_reconcile_does_not_override_user_default(tmp_path: Path) -> None:
+    """If a different model is already default, reconcile registers the
+    cfg model but does NOT flip the default.
+
+    User intent (manual `embed switch`) beats cfg defaults — the cfg
+    model is available for use but doesn't take over unless the user
+    switches to it.
+    """
+    # Wipe seed, then register a different default model manually.
+    setup_cfg = Config(data_dir=tmp_path, embedder=EmbedderConfig(enabled=False))
+    setup_container = wire(setup_cfg)
+    setup_container.db.execute("DELETE FROM embedding_model")
+    setup_container.db.execute(
+        "INSERT INTO embedding_model "
+        "(slug, name, provider, dimension, vec_table, is_default, status, config, created_at) "
+        "VALUES ('user-choice', 'user-choice', 'openai-compat', 1024, 'vec_user_choice_1024', "
+        "1, 'active', '{}', strftime('s','now'))"
+    )
+    setup_container.close()
+
+    # wire() with cfg.model='from-cfg' — reconcile registers 'from-cfg'
+    # but must leave 'user-choice' as the default.
+    cfg = Config(
+        data_dir=tmp_path,
+        embedder=EmbedderConfig(
+            enabled=True,
+            provider="openai-compat",
+            model="from-cfg",
+            dimension=1024,
+            base_url="http://localhost:1234/v1",
+            api_key="sk-test",
+        ),
+    )
+    container = wire(cfg)
+    try:
+        defaults = container.db.execute(
+            "SELECT slug FROM embedding_model WHERE is_default = 1"
+        ).fetchall()
+        assert defaults == [("user-choice",)], (
+            "user's manual default must not be overridden by reconcile; "
+            f"got {defaults}"
+        )
+        # 'from-cfg' should still exist, just not be default.
+        from_cfg = container.db.execute(
+            "SELECT is_default FROM embedding_model WHERE slug = 'from-cfg'"
+        ).fetchone()
+        assert from_cfg is not None, "reconcile should still register 'from-cfg'"
+        assert from_cfg[0] == 0
+    finally:
+        container.close()
 
 
 def test_wire_enabled_embedder_with_seeded_active_model(tmp_path: Path) -> None:
