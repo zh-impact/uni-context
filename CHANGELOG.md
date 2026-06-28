@@ -2,6 +2,33 @@
 
 Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
+## 2026-06-28 — Post-migration review fixes
+
+Three findings from a code review of the completed Python port:
+
+- **Config `data_dir: "."` no longer silently rewritten.** The
+  after-validator treated `Path(".")` (the materialized form of both `""`
+  and `"."`) as empty and rewrote it to the XDG default. Go's loader
+  (config.go:95) only coalesces the empty string. Switched to a
+  `model_validator(mode="before")` so the check fires against the raw
+  empty string before Pydantic's Path coercion. User's explicit `.` (CWD)
+  is now preserved. (`285abd7`)
+- **OpenAI provider default restored.** Config applied the OpenAI
+  base_url default only for `"openai-compat"`, but archived Go
+  config.go:112 uses `"openai"`. Existing Go configs with `provider:
+  openai` lost their default. Both spellings now trigger the default.
+  (`285abd7`)
+- **Per-leg timeout enforced in hybrid search.** `SearchService` exposed
+  `leg_timeout` but the SQLite legs were never wrapped, so a wedged vec0
+  table or FTS5 tokenizer spin could freeze the CLI. Added
+  `_run_leg_with_timeout` (ThreadPoolExecutor + `Future.result(timeout)`)
+  around both legs, reproducing Go's `context.WithTimeout` boundary
+  (search.go:241,252). The existing per-leg fallback paths handle the
+  resulting `TimeoutError`. (`285abd7`)
+
+Tests: 4 config + 2 service timeout added (TDD RED → GREEN). Full suite
+**586 passed / 3 skipped**.
+
 ## 2026-06-28 — Python migration complete (all 8 phases)
 
 The Python implementation under `python/` is the project's primary,
