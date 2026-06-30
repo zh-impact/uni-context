@@ -1,8 +1,8 @@
 # P3 — Auto-Ingest from Claude Code Sessions
 
-> **Status:** Design doc, revision 4 — 12 first-review findings + 4
-> second-review findings + 2 third-review findings addressed.
-> Awaiting fourth-pass review.
+> **Status:** Design doc, revision 5 — 12 first-review + 4 second-review
+> + 2 third-review + 2 fourth-review findings addressed. Awaiting
+> fifth-pass review.
 >
 > **Scope:** Hook-driven auto-ingest of Claude Code transcripts into
 > `project` scope as paired raw + AI-summary rows. Manual ingest
@@ -527,14 +527,45 @@ New service, mirrors `WorkerService` for embeddings. Lifecycle:
    - Load the full transcript from FileStore via `content_uri`.
    - Build the prompt (§7.3).
    - Call LLM (`SummarizerClient`, §8).
-   - On success: in a single DB transaction, UPDATE the summary row's
-     `content = summary_text`, `word_count = count_words(text)` (🟡),
-     `any_embedding = 0` (so the embed pipeline can pick it up — see
-     §11.2 for why this is the worker's responsibility). Then UPDATE
-     `context_summary.status='done'`, `summarized_at=now`,
-     `attempts += 1`. After the transaction commits, call
-     `embed_svc.embed_item(item.id, item.title, summary_text)` (outside
-     the transaction — same pattern as `IngestService.create`).
+   - On success: **branch on summary size (🟡)** — the §7.4 split
+     between inline and externalize is implemented here, not later:
+
+     ```python
+     old_uri = item.content_uri  # capture before overwrite (for 🟢 cleanup)
+     if len(summary_text.encode()) <= CONTENT_INLINE_LIMIT:
+         # inline path
+         item.content = summary_text
+         item.content_uri = ""
+     else:
+         # externalize path per §3.3 / §7.4 (4 KB–max_length range)
+         new_uri, _ = fs.put(summary_text.encode(), "text/markdown")
+         item.content = ""
+         item.content_uri = new_uri
+     # both branches converge:
+     item.word_count = count_words(summary_text)  # 🟡
+     item.any_embedding = 0  # so embed pipeline re-queues — see §11.2
+
+     with db.transaction():
+         repo.update(item)
+         ctx_summary.status = 'done'
+         ctx_summary.summarized_at = now
+         ctx_summary.attempts += 1
+         summary_repo.update_status(ctx_summary)
+
+     # After COMMIT — FileStore cleanup per §9.2 safe ordering (🟢):
+     # if a previous successful summary had externalized content, the
+     # old blob's refcount must decrement now (DB no longer references
+     # it). safe-ordering: DB commit first, fs.delete after — so an
+     # embed-svc call aborting below doesn't corrupt state.
+     if old_uri != "" and old_uri != item.content_uri:
+         fs.delete(old_uri)
+
+     # Outside the transaction — mirrors IngestService.create pattern.
+     # Pass summary_text directly (it's in memory); embed_svc embeds it
+     # immediately. Embed worker's _hydrate_content reads content_uri
+     # on retry, so externalize is transparent to retries.
+     embed_svc.embed_item(item.id, item.title, summary_text)
+     ```
    - On failure: `attempts += 1`, `last_error=str(exc)`. After 3
      attempts, `status='failed'` (manual retry via future command).
 3. Cooperative cancellation via `threading.Event` (same pattern as
@@ -782,21 +813,39 @@ docstring: "no max-attempts cap").
 fills content?**
 
 The `SummaryWorkerService` is responsible. After it writes summary
-text to the row, it explicitly invokes the embed pipeline:
+text to the row, it explicitly invokes the embed pipeline. The
+worker's success path branches on summary size per §7.1 (inline vs
+externalize); both branches reset `any_embedding=0` and call
+`embed_item` afterwards:
 
 ```python
 # Inside SummaryWorkerService, after the LLM call succeeds:
-with db.transaction():
+old_uri = item.content_uri  # capture before overwrite
+if len(summary_text.encode()) <= CONTENT_INLINE_LIMIT:
     item.content = summary_text
-    item.word_count = count_words(summary_text)
-    item.any_embedding = 0          # reset: will need re-embed
+    item.content_uri = ""
+else:
+    new_uri, _ = fs.put(summary_text.encode(), "text/markdown")
+    item.content = ""
+    item.content_uri = new_uri
+item.word_count = count_words(summary_text)
+item.any_embedding = 0          # reset: will need re-embed
+
+with db.transaction():
     repo.update(item)
     ctx_summary.status = 'done'
     ctx_summary.attempts += 1
     ctx_summary.summarized_at = now
     summary_repo.update_status(ctx_summary)
 
-# Outside the transaction: synchronous embed call (mirrors IngestService)
+# After COMMIT — refcount cleanup (§9.2 safe ordering) if previous
+# summary was externalized.
+if old_uri != "" and old_uri != item.content_uri:
+    fs.delete(old_uri)
+
+# Outside the transaction: synchronous embed call (mirrors IngestService).
+# Pass summary_text directly (in memory); embed retry path uses
+# _hydrate_content which reads content_uri transparently.
 embed_svc.embed_item(item.id, item.title, summary_text)
 ```
 
@@ -1021,6 +1070,17 @@ installation, not via feature flags.
     a configurable sanity cap (default 50 KB), distinct from the 4 KB
     inline-vs-externalize boundary. 4 KB–50 KB responses follow §3.3
     externalize, not failure.
+- **Codebase consistency (revision 5 — fourth review):**
+  - 🟡 #19: §7.1 + §11.2 success path now branches on summary size
+    (≤4 KB inline vs >4 KB externalize) — previously hardcoded
+    `content = summary_text`, contradicting the §7.4 externalize row.
+    `embed_svc.embed_item` receives `summary_text` directly (in
+    memory) in both branches; retry path uses `_hydrate_content` which
+    reads `content_uri` transparently.
+  - 🟢 #20: §7.1 + §11.2 success path includes refcount cleanup for
+    previously-externalized summary blobs (re-summarization case),
+    following the same §9.2 safe-ordering rule (DB commit first,
+    `fs.delete` after).
 - **Scope check:** single subsystem (auto-ingest), single source
   (Claude Code), single new table. Fits one plan.
 - **Ambiguity check:** "non-git CWD" is fully specified (§5.4); "hook
