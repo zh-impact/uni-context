@@ -1,6 +1,8 @@
 # P3 — Auto-Ingest from Claude Code Sessions
 
-> **Status:** Design doc, awaiting user review.
+> **Status:** Design doc, revision 2 — 12 codebase-consistency findings
+> from first review addressed (4 🔴 hard problems, 5 🟡 missing details,
+> 3 🟢 low-priority). Awaiting second-pass review.
 >
 > **Scope:** Hook-driven auto-ingest of Claude Code transcripts into
 > `project` scope as paired raw + AI-summary rows. Manual ingest
@@ -120,11 +122,26 @@ a metadata column when that lands.
 
 ### 3.3 ContextItem shapes for a Claude Code session
 
+> **Construction note (🔴):** `items.models.new_context_item`
+> (Python) hardcodes three fields that P3 must override **after**
+> construction:
+>
+> - `id=str(uuid.uuid7())` (line 190) — random; P3 needs deterministic
+>   `uuid5`.
+> - `confidence=1.0` (line 209) — fixed; P3's summary row needs `< 1.0`.
+> - `version=1` (line 214) — fixed; P3 bumps on re-ingest.
+>
+> `ContextItem` is a `slots=True` dataclass; field reassignment is legal
+> (`item.id = ...`) but undocumented. `SessionIngestService` does this
+> override in one place immediately after the `new_context_item` call —
+> not scattered across the codebase. This keeps `new_context_item`'s
+> contract intact for non-P3 callers.
+
 **Raw row:**
 
 | Field | Value |
 |-------|-------|
-| `id` | `uuid5(NAMESPACE_OID, f"claude-code:session:{session_uuid}:raw")` |
+| `id` | `uuid5(NAMESPACE_OID, f"claude-code:session:{session_uuid}:raw")` — override after construction |
 | `scope` | `Scope.PROJECT` |
 | `kind` | `Kind.CONVERSATION_MSG` |
 | `source` | `Source.AGENT` |
@@ -132,18 +149,18 @@ a metadata column when that lands.
 | `project_id` | resolved from CWD (see §5) |
 | `conversation_id` | session UUID |
 | `content` | slim transcript (≤4 KB inline) |
-| `content_uri` | FileStore address for **full verbatim** transcript |
-| `content_hash` | SHA-256 of full transcript |
+| `content_uri` | FileStore address (`file://<sha256-hex>`) for **full verbatim** transcript |
+| `content_hash` | `sha256:<hex>` — exactly the digest returned by `FileStore.put()` (matches existing convention; **not** bare hex) |
 | `source_meta` | `{"session_uuid", "cwd", "turn_count", "git_remote", "ingest_version"}` |
-| `confidence` | `1.0` (raw is ground truth) |
-| `version` | bumped when full transcript SHA-256 changes |
+| `confidence` | `1.0` (raw is ground truth — no override needed) |
+| `version` | starts at `1` (constructor default); bumped when full transcript SHA-256 changes |
 | `any_embedding` | existing pipeline; not P3's concern |
 
 **Summary row:**
 
 | Field | Value |
 |-------|-------|
-| `id` | `uuid5(NAMESPACE_OID, f"claude-code:session:{session_uuid}:summary")` |
+| `id` | `uuid5(NAMESPACE_OID, f"claude-code:session:{session_uuid}:summary")` — override after construction |
 | `scope` | `Scope.PROJECT` (inherits from raw) |
 | `kind` | `Kind.MEMORY` |
 | `source` | `Source.AGENT` |
@@ -151,9 +168,17 @@ a metadata column when that lands.
 | `conversation_id` | session UUID |
 | `parent_id` | raw row's id |
 | `content` | summary text, empty until worker fills it (≤4 KB inline; if longer, externalized normally) |
-| `confidence` | `0.7` (AI-generated; **exact value TBD** in implementation — see §11.3) |
-| `version` | bumped when summary regenerated |
+| `word_count` | `0` at construction (empty content); **updated by worker** when summary is filled (§7.1) |
+| `confidence` | `0.7` — override after construction (AI-generated; **exact value TBD** in implementation — see §11.3) |
+| `version` | starts at `1`; bumped when summary regenerated |
 | `source_meta` | `{"summarizer_model", "summarized_at", "raw_ingest_version"}` |
+
+**`ingest_version` initial value (🟢):** monotonically increasing integer
+scoped to a session. Initial ingest sets `ingest_version=1`. Each re-ingest
+(§9.2 Path 5) bumps it by 1. Stored in `source_meta.ingest_version` so the
+value is visible without a separate column. Purpose: lets the worker / UI
+distinguish "first ingest" from "Nth re-ingest" and lets the user audit how
+many times a session was processed.
 
 `uuid5` IDs make re-ingest idempotent without a separate lookup table:
 same session UUID always produces the same `ContextItem.id` pair.
@@ -175,8 +200,17 @@ Concretely:
   similar).
 - `ReindexFTSService`: continues to index inline `content` for FTS —
   no change. The slim content is the FTS source of truth.
-- `IngestService` for P3 rows: writes both fields explicitly (does
-  **not** run through the existing ">4 KB → externalize" branch).
+- **`SessionIngestService` bypasses `IngestService.create()` entirely**
+  and calls `ContextRepo.create()` directly (🟡). The existing
+  `IngestService.create()` externalize branch (`python/src/unictx/items/
+  ingest.py` lines 234-241) is **mutually exclusive**: it sets
+  `content_uri` *xor* `content`, never both. P3's raw row needs both
+  fields populated, which that branch cannot produce. Rather than wedge
+  a special case into `IngestService.create()`, P3 introduces a new
+  `SessionIngestService` that owns the full-write path: FileStore puts,
+  `ContextItem` construction + `.id`/`.confidence` overrides, and direct
+  `ContextRepo.create()`. The PDF rollback machinery and content-size
+  logic in `IngestService.create()` are not relevant to P3.
 
 This is a localized semantic shift, not a refactor of the inline-or-
 externalized invariant for other kinds.
@@ -204,15 +238,52 @@ Behavior:
    (§5.4), exit 0.
 3. Read transcript JSONL.
 4. Filter to slim version (§6).
-5. Write full transcript to FileStore → get hash.
-6. Upsert raw row + empty summary row + `context_summary(status='pending')`.
+5. Write full transcript to FileStore → get `file://<hex>` URI and
+   `sha256:<hex>` digest. If slim content overflows the 4 KB inline
+   limit (§6.3), also `fs.put(slim_md_bytes, "text/markdown")` and
+   capture `(slim_uri, slim_digest)` for `source_meta.slim_uri`.
+6. **Atomic three-step DB write (🔴):** `SessionIngestService.write()`
+   wraps the following in a single `BEGIN … COMMIT` transaction
+   (sqlite3 connection in manual-commit mode):
+
+   ```
+   BEGIN;
+   -- (a) raw row upsert
+   INSERT INTO context_item (id, scope, kind, source, …, content, content_uri, …)
+     VALUES (?, ?, ?, ?, …, ?, ?, …)
+     ON CONFLICT(id) DO UPDATE SET … ;
+   -- (b) empty summary row upsert
+   INSERT INTO context_item (id, scope, kind, source, parent_id, content, …)
+     VALUES (?, ?, ?, ?, ?, '', …)
+     ON CONFLICT(id) DO UPDATE SET content='' ;
+   -- (c) summary status row
+   INSERT INTO context_summary (item_id, status, attempts, updated_at)
+     VALUES (?, 'pending', 0, ?)
+     ON CONFLICT(item_id) DO UPDATE SET status='pending', attempts=0 ;
+   COMMIT;
+   ```
+
+   Rationale: if any of the three writes fails (e.g. disk full mid-write,
+   `ON CONFLICT` schema drift), the user is left in a torn state — raw
+   row present but no summary row, or summary row orphaned from
+   `context_summary` status. The transaction makes the three-step
+   atomic. On `OperationalError` from sqlite3 the whole write is rolled
+   back, the hook surfaces the error to stderr, and exits 0 (per the
+   rule below). The next Stop hook firing re-runs the same upserts
+   idempotently.
+
+   FileStore writes (step 5) happen **before** the transaction because
+   they cannot be rolled back via SQLite. On DB transaction failure the
+   orphaned FileStore blobs are acceptable: they are refcount-zero and
+   will be cleaned by a future janitor; they do not corrupt the DB.
+
 7. Exit 0 (always — hook failures must not block the user's session
    end). Errors go to stderr.
 
 **Timeout:** Stop hook has a wall-clock budget from Claude Code
 (typically 30s). All P3 hook work fits comfortably: JSONL parse +
-slim filter + FileStore write + 3 SQL upserts. LLM call is **not** in
-this path — it's async via worker.
+slim filter + FileStore write + one transaction of 3 SQL upserts. LLM
+call is **not** in this path — it's async via worker.
 
 ### 4.2 Hook installation: `unictx hook install stop`
 
@@ -222,7 +293,16 @@ settings:
 - `~/.claude/settings.json` (user-global, default), or
 - `.claude/settings.json` in CWD (project-local, with `--scope project`)
 
-Entry shape:
+**Reference (🟢):** Claude Code's hook system is documented in the
+official docs at
+`https://docs.claude.com/en/docs/claude-code/hooks`. The Stop hook
+fires after the assistant finishes responding and the session is about
+to end. Payload schema, event types, and settings.json structure all
+follow that reference. If Anthropic changes the schema, P3's parser
+must update accordingly — the spec hardcodes against the current
+published shape.
+
+Entry shape (per current Claude Code docs):
 
 ```json
 {
@@ -379,22 +459,39 @@ Target size: typically <4 KB for a normal session. If the slim version
 itself exceeds 4 KB (long sessions), it overflows naturally — the inline
 `content` field stores the first ~3.5 KB and a trailing `... [slim
 truncated, see content_uri for full]` marker; the **full slim version**
-also lives in FileStore alongside the verbatim transcript (two files,
-two hashes — or one combined file; see §6.3).
+also lives in FileStore alongside the verbatim transcript (two separate
+blobs, two separate SHA-256 hashes — see §6.3).
 
 ### 6.3 FileStore layout
 
-Two files per session, both content-addressed by SHA-256:
+`FileStore.put(bytes, mime)` content-addresses by SHA-256 of the bytes
+and returns `("file://<hex>", "sha256:<hex>")`. The `_hash_from_uri`
+helper (`python/src/unictx/storage/filestore.py` lines 94-101) **strictly
+requires** exactly 64 hex characters after `file://` — suffix conventions
+like `<hex>.slim.md` would be rejected at hydration time.
 
-- `<sha256>` — **full verbatim transcript** (raw JSONL concatenated or
-  slightly cleaned). Referenced by raw row's `content_uri`.
-- `<sha256>.slim.md` — **slim version**. Referenced only when slim
-  overflows the 4 KB inline limit; otherwise the slim version lives
-  inline in `content` and is not separately stored.
+Per session, P3 calls `FileStore.put()` **up to twice** (🔴):
 
-The `.slim.md` suffix convention keeps FileStore self-describing —
-inspection tools can distinguish transcript types without reading the
-DB.
+- **Always:** `fs.put(full_jsonl_bytes, "application/x-ndjson")` →
+  `(full_uri, full_digest)`. Stored on raw row's `content_uri` /
+  `content_hash`.
+- **Only when slim content overflows the 4 KB inline limit:**
+  `fs.put(slim_md_bytes, "text/markdown")` → `(slim_uri, slim_digest)`.
+  The slim URI is stored in raw row's `source_meta.slim_uri` (a field
+  the hook populates only on overflow).
+
+Rationale for storing slim URI in `source_meta` rather than as a separate
+column: this avoids a schema migration, and slim-overflow is the rare
+case — most sessions produce a slim version that fits inline.
+
+Re-ingest (§9.2 Path 5) must `fs.delete(old_full_uri)` before the new
+`put` so refcounts decrement correctly (🟡, see §9.2). The slim blob
+follows the same rule when it exists.
+
+**No `.slim.md` suffix convention.** FileStore keys are bare hashes;
+mime type lives in the sidecar `.meta` JSON. Inspection tools that need
+to distinguish transcript types should query the DB (`source=AGENT` +
+`kind=CONVERSATION_MSG`), not the FileStore layout.
 
 ## 7. AI summary pipeline
 
@@ -404,14 +501,28 @@ New service, mirrors `WorkerService` for embeddings. Lifecycle:
 
 1. Polls `context_summary WHERE status = 'pending'` (configurable
    interval, default 5s).
+   - **Note (🟢):** This is a **different polling semantics** from the
+     embed worker. `embed/worker.py` line 89 polls `list_failed` —
+     i.e. re-tries rows that the embed pipeline already attempted and
+     failed. The summary worker polls `'pending'` because summary
+     generation is the **initial** processing step for the summary row,
+     not a retry of a previous failure. Once `status='done'`, the row
+     is never re-polled. Once `status='failed'` (3-strike), it requires
+     manual intervention (future command). Do not unify the two polling
+     predicates.
 2. For each pending row:
    - Load the parent raw row.
    - Load the full transcript from FileStore via `content_uri`.
    - Build the prompt (§7.3).
    - Call LLM (`SummarizerClient`, §8).
-   - On success: write summary text to summary row's `content`; set
+   - On success: in a single DB transaction, UPDATE the summary row's
+     `content = summary_text`, `word_count = count_words(text)` (🟡),
+     `any_embedding = 0` (so the embed pipeline can pick it up — see
+     §11.2 for why this is the worker's responsibility). Then UPDATE
      `context_summary.status='done'`, `summarized_at=now`,
-     `attempts += 1`.
+     `attempts += 1`. After the transaction commits, call
+     `embed_svc.embed_item(item.id, item.title, summary_text)` (outside
+     the transaction — same pattern as `IngestService.create`).
    - On failure: `attempts += 1`, `last_error=str(exc)`. After 3
      attempts, `status='failed'` (manual retry via future command).
 3. Cooperative cancellation via `threading.Event` (same pattern as
@@ -528,7 +639,24 @@ On every ingest (Stop hook or manual):
 5. If present and `content_hash` differs: UPDATE raw row, bump
    `version`. Reset summary: clear summary row's `content`, set
    `context_summary.status='pending'`, `attempts=0` so the worker
-   regenerates with the new transcript.
+   regenerates with the new transcript. **Refcount cleanup (🟡):**
+   re-ingest leaks a refcount on the old verbatim blob if we forget to
+   decrement. Safe ordering (because FileStore writes cannot be rolled
+   back via SQLite):
+
+   ```
+   # (1) outside DB transaction: put NEW first (new blob exists)
+   new_uri, new_digest = fs.put(new_full_bytes)
+   # (2) inside BEGIN … COMMIT: UPDATE raw row's content_uri/content_hash
+   #     — capture old_uri via SELECT before UPDATE
+   # (3) AFTER COMMIT succeeds: fs.delete(old_uri) — old blob refcount-1
+   ```
+
+   Why this order: if (2) aborts, the DB still references `old_uri`
+   (unchanged) and `new_uri` is orphaned-but-refcount-zero — a janitor
+   can clean it. If we instead deleted `old_uri` first then DB-aborted,
+   the DB would reference a deleted blob — corruption. Apply the same
+   sequence to `source_meta.slim_uri` when it was previously set.
 
 ### 9.3 Session resume
 
@@ -582,26 +710,79 @@ separating duplicates the poll loop but isolates failures.
 keeps the summary path free to evolve (e.g. adding entity extraction
 later) without touching embed.
 
-### 11.2 Embed pipeline interaction with summary row
+**Caveat (🟢):** the new service polls `'pending'` (initial
+processing) while `WorkerService` polls `'failed'` (retry after
+synchronous-at-ingest failure). These are **different semantics** —
+unifying them via a `job_kind` discriminator (the "extend" option)
+would require both predicates in the same query, which complicates the
+poll loop. The "new service" option sidesteps this entirely. See §7.1
+for the polling-predicate note.
 
-Summary row has `content` (the summary text). Does the existing embed
-pipeline embed it? **Default: yes** — it's a `kind=MEMORY` row, and
-the embed pipeline embeds everything with non-empty content. This
-gives hybrid search access to summary semantics, which is the whole
-point.
+### 11.2 Embed pipeline interaction with summary row (🟡)
 
-But this means summary rows have **two** async dependencies: summary
-generation (worker) + embedding (existing pipeline). Order:
+The existing embed pipeline is **synchronous-at-ingest** plus
+**retry-on-failure**:
 
-1. Hook writes raw + empty summary + `context_summary(pending)`.
-2. Existing embed pipeline sees raw row with content → embeds slim
-   version.
-3. Summary worker fills summary content.
-4. Existing embed pipeline sees summary row now has content → embeds
-   it.
+- `IngestService.create()` calls `embed_item()` synchronously at row
+  creation time (`python/src/unictx/items/ingest.py` line 303). If it
+  succeeds: `any_embedding=1`. If it fails: `EmbedService.embed_item`
+  records `status='failed'` and raises; the warning is logged and
+  ingest continues.
+- `WorkerService` (`embed/worker.py` line 89) polls `list_failed` to
+  retry. There is **no `list_pending`** in the embed pipeline — rows
+  are not lazily discovered.
 
-Steps 2 and 3-4 are independent. Step 4 is automatic (embed pipeline
-re-scans). No coordination needed.
+This is incompatible with the summary row's lifecycle ("empty at
+construction, filled by worker later"). Two questions:
+
+**Q1: What happens if `embed_item` is called on empty content?**
+`EmbedService.embed_item` (`embed/service.py` lines 120-124) composes
+`title + "\n\n" + content`, strips, and **raises `RuntimeError("embed:
+empty text")` with `status='failed'`** if the result is empty. So a
+naive synchronous embed call at summary-row construction would
+permanently mark the row `status='failed'` and the worker would
+retry forever (per the worker docstring: "no max-attempts cap").
+
+**Q2: Then how does the summary row get embedded after the worker
+fills content?**
+
+The `SummaryWorkerService` is responsible. After it writes summary
+text to the row, it explicitly invokes the embed pipeline:
+
+```python
+# Inside SummaryWorkerService, after the LLM call succeeds:
+with db.transaction():
+    item.content = summary_text
+    item.word_count = count_words(summary_text)
+    item.any_embedding = 0          # reset: will need re-embed
+    repo.update(item)
+    ctx_summary.status = 'done'
+    ctx_summary.attempts += 1
+    ctx_summary.summarized_at = now
+    summary_repo.update_status(ctx_summary)
+
+# Outside the transaction: synchronous embed call (mirrors IngestService)
+embed_svc.embed_item(item.id, item.title, summary_text)
+```
+
+If the embed call fails (network, empty text, etc.) it records
+`status='failed'` in `context_embedding` and the existing
+`WorkerService` retry loop drains it — the summary row's status
+remains `'done'`; the embed retry is decoupled.
+
+**What about the raw row at hook time?** Raw row has non-empty slim
+content, so `SessionIngestService` calls `embed_item()` synchronously
+at ingest (mirroring `IngestService.create()`). If it fails, the
+existing `WorkerService` retries — same as any other ingest.
+
+**What about the summary row at hook time?** `SessionIngestService`
+does **not** call `embed_item` on the empty summary row. The summary
+row starts with `any_embedding=0` (constructor default) and stays
+that way until the summary worker fills content + invokes embed.
+
+This is a **new pattern**: `SessionIngestService` owns the embed-call
+decision per row (yes for raw, no for empty summary), rather than the
+default "always call embed on every new row" of `IngestService.create`.
 
 ### 11.3 Summary `confidence` exact value
 
@@ -758,6 +939,34 @@ installation, not via feature flags.
   value is genuinely deferred (default model name, exact confidence).
 - **Internal consistency:** §3.4's content/content_uri coexistence is
   the only schema shift; §6.3 + §7 + §9 all reference it consistently.
+  §11.2 has been rewritten to match the actual embed pipeline shape
+  (synchronous-at-ingest + retry-on-failure, no lazy scan).
+- **Codebase consistency (P3 review findings addressed):**
+  - 🔴 #1, #2: `new_context_item` hardcodes `id` (uuid7) and
+    `confidence` (1.0); §3.3 construction note documents the post-
+    construction override on the slots dataclass.
+  - 🔴 #3: §6.3 replaces the `.slim.md` suffix convention with two
+    separate `FileStore.put()` calls (FileStore's `_hash_from_uri`
+    rejects non-64-hex URIs).
+  - 🔴 #4: §4.1 wraps the three-step write (raw + summary + context_summary)
+    in an explicit `BEGIN … COMMIT` transaction; FileStore writes
+    stay outside the transaction (cannot be rolled back via SQLite).
+  - 🟡 #5: §11.2 spells out exactly when `embed_item` is called on the
+    summary row (worker's responsibility, after content fill).
+  - 🟡 #6: §9.2 documents the safe ordering — put-new, DB UPDATE,
+    delete-old — so DB-abort never leaves a dangling reference.
+  - 🟡 #7: §3.4 + §4.1 make explicit that `SessionIngestService`
+    bypasses `IngestService.create()` (whose externalize branch is
+    mutually exclusive) and writes via `ContextRepo.create()` directly.
+  - 🟡 #8: §7.1 includes `word_count` UPDATE in the worker's success
+    path (constructor default is 0).
+  - 🟡 #9: §3.3 raw row clarifies `content_hash` format as
+    `sha256:<hex>` matching `FileStore.put()` return.
+  - 🟢 #10: §7.1 + §11.1 note that summary worker polls `'pending'`
+    while embed worker polls `'failed'` — different semantics.
+  - 🟢 #11: §4.2 cites Claude Code's official hooks documentation.
+  - 🟢 #12: §3.3 defines `ingest_version` initial value (1) and bump
+    rule (per re-ingest).
 - **Scope check:** single subsystem (auto-ingest), single source
   (Claude Code), single new table. Fits one plan.
 - **Ambiguity check:** "non-git CWD" is fully specified (§5.4); "hook
