@@ -1,8 +1,7 @@
 # P3 — Auto-Ingest from Claude Code Sessions
 
-> **Status:** Design doc, revision 2 — 12 codebase-consistency findings
-> from first review addressed (4 🔴 hard problems, 5 🟡 missing details,
-> 3 🟢 low-priority). Awaiting second-pass review.
+> **Status:** Design doc, revision 3 — 12 first-review findings + 4
+> second-review findings addressed. Awaiting third-pass review.
 >
 > **Scope:** Hook-driven auto-ingest of Claude Code transcripts into
 > `project` scope as paired raw + AI-summary rows. Manual ingest
@@ -255,7 +254,7 @@ Behavior:
    -- (b) empty summary row upsert
    INSERT INTO context_item (id, scope, kind, source, parent_id, content, …)
      VALUES (?, ?, ?, ?, ?, '', …)
-     ON CONFLICT(id) DO UPDATE SET content='' ;
+     ON CONFLICT(id) DO UPDATE SET content='', any_embedding=0 ;
    -- (c) summary status row
    INSERT INTO context_summary (item_id, status, attempts, updated_at)
      VALUES (?, 'pending', 0, ?)
@@ -610,9 +609,21 @@ other.
 
 ### 8.3 Pydantic model
 
-New `SummarizerConfig` BaseModel in `config.py`, mirrors
-`EmbedderConfig` exactly: same fields, same defaults logic via
-`model_validator(mode="after")`, same `extra="forbid"` strictness.
+New `SummarizerConfig` BaseModel in `config.py`. **Same pattern as**
+`EmbedderConfig` (not "same fields" — the two differ in detail):
+
+- **Shared:** `enabled: bool = False`, `provider: str = ""`,
+  `base_url: str = ""`, `model: str = ""`, `api_key: str = ""`;
+  `model_config = _STRICT` (`extra="forbid"`); same
+  `@model_validator(mode="after")` `apply_defaults` shape with the
+  `enabled=False` short-circuit + provider-keyed `base_url` map
+  (`ollama`/`openai`/`openai-compat`).
+- **Summarizer drops:** `dimension` (embedding-only — vector size
+  doesn't apply to a text-out pipeline).
+- **Summarizer adds:** `prompt_template: str = ""` (summarizer-only;
+  empty default falls back to the §7.3 built-in template at call
+  time).
+
 `Config.summarizer: SummarizerConfig = Field(default_factory=SummarizerConfig)`.
 
 ## 9. Dedup and idempotency
@@ -657,6 +668,11 @@ On every ingest (Stop hook or manual):
    can clean it. If we instead deleted `old_uri` first then DB-aborted,
    the DB would reference a deleted blob — corruption. Apply the same
    sequence to `source_meta.slim_uri` when it was previously set.
+   **Symmetric cleanup (🟡):** if the **new** slim content fits inline
+   (≤4 KB) but the **old** row had `source_meta.slim_uri` set, the
+   UPDATE step must also **drop the `slim_uri` key from
+   `source_meta`** in the same UPDATE — otherwise the DB keeps a
+   dangling URI pointing to a blob that step (3) just deleted.
 
 ### 9.3 Session resume
 
@@ -737,11 +753,12 @@ construction, filled by worker later"). Two questions:
 
 **Q1: What happens if `embed_item` is called on empty content?**
 `EmbedService.embed_item` (`embed/service.py` lines 120-124) composes
-`title + "\n\n" + content`, strips, and **raises `RuntimeError("embed:
-empty text")` with `status='failed'`** if the result is empty. So a
-naive synchronous embed call at summary-row construction would
-permanently mark the row `status='failed'` and the worker would
-retry forever (per the worker docstring: "no max-attempts cap").
+`title + "\n\n" + content`, strips, and **raises
+`RuntimeError(f"embed: empty text for item {item_id}")` with
+`status='failed'`** if the result is empty. So a naive synchronous
+embed call at summary-row construction would permanently mark the row
+`status='failed'` and the worker would retry forever (per the worker
+docstring: "no max-attempts cap").
 
 **Q2: Then how does the summary row get embedded after the worker
 fills content?**
@@ -967,6 +984,16 @@ installation, not via feature flags.
   - 🟢 #11: §4.2 cites Claude Code's official hooks documentation.
   - 🟢 #12: §3.3 defines `ingest_version` initial value (1) and bump
     rule (per re-ingest).
+- **Codebase consistency (revision 3 — second review):**
+  - 🟡 #13: §4.1 summary row `ON CONFLICT` clause now resets
+    `any_embedding=0` alongside `content=''`, so re-ingest before
+    worker re-fill can't expose stale vectors via SearchService.
+  - 🟡 #14: §8.3 `SummarizerConfig` description corrected — drops
+    EmbedderConfig's `dimension`, adds summarizer-only `prompt_template`.
+  - 🟢 #15: §11.2 RuntimeError wording matches actual code
+    (`f"embed: empty text for item {item_id}"`, includes id).
+  - 🟢 #16: §9.2 documents symmetric slim_uri cleanup — drop the key
+    from `source_meta` if new slim fits inline but old had overflow.
 - **Scope check:** single subsystem (auto-ingest), single source
   (Claude Code), single new table. Fits one plan.
 - **Ambiguity check:** "non-git CWD" is fully specified (§5.4); "hook
