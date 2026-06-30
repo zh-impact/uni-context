@@ -62,7 +62,7 @@ import sqlite3
 from typing import Any
 
 from unictx.items.errors import ItemNotFound
-from unictx.items.models import ContextItem
+from unictx.items.models import ContextItem, Scope
 from unictx.items.repo import ItemFilter
 
 __all__ = ["ContextRepoImpl", "encode_cursor", "decode_cursor"]
@@ -383,6 +383,14 @@ class ContextRepoImpl:
         if filter.project_id:
             where.append("project_id=?")
             args.append(filter.project_id)
+        if filter.as_scope == Scope.PROJECT and filter.as_project_id:
+            # P1 access direction: row-level project isolation. A PROJECT
+            # actor sees only its own project's rows OR any global row
+            # (global is shared). Mirrors the vector-store pushdown.
+            # User rows can't appear because the caller converged scopes
+            # via visible_scopes() before constructing this filter.
+            where.append("(project_id=? OR scope='global')")
+            args.append(filter.as_project_id)
         if filter.tags:
             # OR semantics: an item matches if it carries ANY of the
             # requested tags. Tags are stored as a JSON array; json_each

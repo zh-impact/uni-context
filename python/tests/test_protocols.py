@@ -19,8 +19,8 @@ import pytest
 from unictx.embed.embedder import Embedder, ModelInfo
 from unictx.embed.embedding_repo import EmbeddingRepo, EmbeddingStatus
 from unictx.embed.model_registry import ModelDescriptor, ModelRegistry, ModelSpec
-from unictx.items.models import ContextItem
-from unictx.items.repo import ContextRepo, ItemFilter
+from unictx.items.models import AccessGrant, ContextItem, Scope
+from unictx.items.repo import AccessRepo, ContextRepo, ItemFilter
 from unictx.pdf.extractor import PDFExtractor
 from unictx.search.searcher import Searcher, SearchHit, SearchQuery
 from unictx.search.vectorstore import VectorHit, VectorQuery, VectorStore
@@ -131,6 +131,26 @@ class _StubFileStore:
         pass
 
 
+class _StubAccessRepo:
+    def list_grants(
+        self, as_scope: Scope, as_project_id: str = ""
+    ) -> list[AccessGrant]:
+        return []
+
+    def grant(self, g: AccessGrant) -> int:
+        return 0
+
+    def revoke(self, grant_id: int) -> None:
+        pass
+
+    def list_all_grants(
+        self,
+        as_scope: Scope | None = None,
+        as_project_id: str = "",
+    ) -> list[tuple[int, AccessGrant]]:
+        return []
+
+
 class _StubPDFExtractor:
     def extract(self, content: bytes) -> str:
         return ""
@@ -172,6 +192,10 @@ def test_file_store_protocol_is_satisfied() -> None:
 
 def test_pdf_extractor_protocol_is_satisfied() -> None:
     assert isinstance(_StubPDFExtractor(), PDFExtractor)
+
+
+def test_access_repo_protocol_is_satisfied() -> None:
+    assert isinstance(_StubAccessRepo(), AccessRepo)
 
 
 # ---------------------------------------------------------------------------

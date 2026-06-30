@@ -4,6 +4,7 @@ Faithful port of Go's ``internal/cli/search.go``. One command::
 
     unictx search <query> [--mode fts-only|hybrid] [--limit N]
                           [--scope user,...] [--kind note,...]
+                          [--as user|project|global] [--project ID]
 
 Behavior preserved:
 
@@ -55,6 +56,10 @@ _VALID_SCOPES = {
     "project": Scope.PROJECT,
     "global": Scope.GLOBAL,
 }
+
+# Valid access identities for --as. Maps the CLI string to the Scope
+# enum. user is the default (innermost layer; sees everything).
+_VALID_AS = _VALID_SCOPES
 
 _VALID_KINDS = {
     "note": Kind.NOTE,
@@ -110,6 +115,17 @@ def parse_kinds(values: list[str]) -> tuple[list[Kind], str | None]:
     return out, None
 
 
+def parse_as_scope(value: str) -> tuple[Scope, str | None]:
+    """Parse the --as flag into a typed Scope. Returns (as_scope, error_msg).
+
+    The access identity determines the visible scope set (see
+    visible_scopes). Defaults to 'user' (innermost; sees everything).
+    """
+    if value not in _VALID_AS:
+        return Scope.USER, f"invalid --as {value!r} (valid: user, project, global)"
+    return _VALID_AS[value], None
+
+
 def _default_load_container() -> AppContainer:
     return wire(load_config(get_config_path()))
 
@@ -131,6 +147,18 @@ def search(  # noqa: PLR0913 - Typer translates these to CLI flags
     limit: int = typer.Option(20, "--limit", help="Max results (default 20)."),
     mode: str = typer.Option(
         "fts-only", "--mode", help="Search mode (Plan 2a: fts-only | hybrid)."
+    ),
+    as_scope: str = typer.Option(
+        "user",
+        "--as",
+        help="Access identity (user|project|global). Default user sees all; "
+        "project/global see less. P1 trust boundary.",
+    ),
+    project: str = typer.Option(
+        "",
+        "--project",
+        help="Project ID the caller acts as (required with --as project for "
+        "project-to-project isolation).",
     ),
 ) -> None:
     """Search across all scopes.
@@ -162,6 +190,19 @@ def search(  # noqa: PLR0913 - Typer translates these to CLI flags
     if err:
         typer.echo(err, err=True)
         raise typer.Exit(code=2)
+    as_scope_value, err = parse_as_scope(as_scope)
+    if err:
+        typer.echo(err, err=True)
+        raise typer.Exit(code=2)
+    # --as project requires --project for project-to-project isolation.
+    # Without a project_id a PROJECT actor would have nothing to scope
+    # against, and the SQL isolation predicate can't fire.
+    if as_scope_value == Scope.PROJECT and not project:
+        typer.echo(
+            "--as project requires --project <ID> for project isolation",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     container = _load_container()
     try:
@@ -176,6 +217,8 @@ def search(  # noqa: PLR0913 - Typer translates these to CLI flags
             kinds=kinds,
             limit=limit,
             mode=SearchMode[enum_key],
+            as_scope=as_scope_value,
+            as_project_id=project,
         )
         try:
             resp = container.search.search(req)
@@ -203,6 +246,7 @@ def search(  # noqa: PLR0913 - Typer translates these to CLI flags
                 ],
                 "total": resp.total,
                 "mode": normalized,
+                "as_scope": str(as_scope_value),
             }
             print_json(payload)
             return

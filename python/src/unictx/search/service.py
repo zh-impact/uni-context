@@ -45,17 +45,19 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass, field
-from typing import IO, Callable, TypeVar
-
-_T = TypeVar("_T")
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from dataclasses import dataclass, field, replace
+from typing import IO, TypeVar
 
 from unictx.embed.embedder import Embedder
-from unictx.items.models import ContextItem, Kind, Scope
-from unictx.items.repo import ContextRepo
+from unictx.items.models import ContextItem, Kind, Scope, visible_scopes
+from unictx.items.repo import AccessRepo, ContextRepo
 from unictx.search.searcher import Searcher, SearchHit, SearchMode, SearchQuery
 from unictx.search.vectorstore import VectorHit, VectorQuery
+
+_T = TypeVar("_T")
 
 __all__ = [
     "SearchRequest",
@@ -80,13 +82,26 @@ _DEFAULT_LEG_TIMEOUT = 5.0
 
 @dataclass(slots=True)
 class SearchRequest:
-    """Inputs to a SearchService.search call. Mirrors Go's SearchRequest."""
+    """Inputs to a SearchService.search call. Mirrors Go's SearchRequest.
+
+    Access direction (P1):
+      as_scope — the access identity of the caller. Determines the
+        default visible scope set via :func:`visible_scopes`. Defaults
+        to USER (innermost; sees everything), so callers that never set
+        it get the legacy "no boundary" behavior.
+      as_project_id — when as_scope==PROJECT, the project the caller
+        acts as. Enforces project-to-project isolation: a PROJECT actor
+        only sees project-scope rows whose project_id matches this.
+        Ignored for USER/GLOBAL actors.
+    """
 
     query: str = ""
     scopes: list[Scope] = field(default_factory=list)
     kinds: list[Kind] = field(default_factory=list)
     limit: int = 0
     mode: SearchMode = SearchMode.FTS_ONLY
+    as_scope: Scope = Scope.USER
+    as_project_id: str = ""
 
 
 @dataclass(slots=True)
@@ -119,19 +134,57 @@ class SearchResponse:
 
 @dataclass(slots=True)
 class _Filters:
-    """Scope/kind acceptance sets built from a SearchRequest.
+    """Scope/kind acceptance sets + project isolation, built from a SearchRequest.
 
     None means "all match" — an empty scopes list produces a filter
     that accepts every scope.
+
+    Project isolation (P1): when as_scope==PROJECT, a project-scope item
+    is accepted only if its project_id matches as_project_id. Global
+    items are never project-scoped, so they pass regardless. USER scope
+    items are already excluded by scope convergence before this filter
+    runs, so no special handling is needed for them here.
     """
 
     scopes: dict[Scope, bool] | None = None
     kinds: dict[Kind, bool] | None = None
+    as_scope: Scope = Scope.USER
+    as_project_id: str = ""
 
     def accepts(self, item: ContextItem) -> bool:
+        # Each guard below is a filter stage; early-return False on the
+        # first rejection. SIM103 suggests collapsing to one negated
+        # return, but the staged form reads as an explicit filter chain
+        # and is easier to extend with future rules.
         if self.scopes is not None and item.scope not in self.scopes:
             return False
-        return not (self.kinds is not None and item.kind not in self.kinds)
+        if self.kinds is not None and item.kind not in self.kinds:
+            return False
+        # Project-to-project isolation: a PROJECT actor only sees its
+        # own project's rows. Global rows (scope=global) are shared, so
+        # they bypass this check. USER rows can't reach here for a
+        # PROJECT actor because scope convergence already removed them.
+        is_other_project = (
+            self.as_scope == Scope.PROJECT
+            and item.scope == Scope.PROJECT
+            and item.project_id != self.as_project_id
+        )
+        return not is_other_project
+
+
+def _filters_from(request: SearchRequest) -> _Filters:
+    """Build a _Filters from a (converged) SearchRequest.
+
+    Pulls the converged scopes/kinds plus the as_scope/as_project_id
+    used for project isolation. Callers MUST pass a request that has
+    already been through _converge().
+    """
+    return _Filters(
+        scopes=_scope_set(request.scopes),
+        kinds=_kind_set(request.kinds),
+        as_scope=request.as_scope,
+        as_project_id=request.as_project_id,
+    )
 
 
 def _scope_set(scopes: list[Scope]) -> dict[Scope, bool] | None:
@@ -176,6 +229,13 @@ class SearchService:
     Construct with ``searcher`` + ``repo`` for fts-only mode. Add
     ``embedder`` for hybrid. ``log`` defaults to ``sys.stderr``;
     tests inject ``StringIO``.
+
+    Access direction (P1): pass ``access_repo`` to enable scope
+    convergence at the search() entry. When ``access_repo`` is None,
+    convergence uses :func:`visible_scopes` with no grants — the default
+    floor still applies (e.g. a PROJECT actor still cannot see USER
+    data), but no grant-based widening is possible. This keeps the
+    constructor backward-compatible with tests that pre-date P1.
     """
 
     def __init__(
@@ -186,6 +246,7 @@ class SearchService:
         *,
         embedder: Embedder | None = None,
         leg_timeout: float | None = None,
+        access_repo: AccessRepo | None = None,
     ) -> None:
         self._searcher = searcher
         self._repo = repo
@@ -194,9 +255,29 @@ class SearchService:
         self._leg_timeout: float = (
             leg_timeout if leg_timeout and leg_timeout > 0 else _DEFAULT_LEG_TIMEOUT
         )
+        self._access_repo: AccessRepo | None = access_repo
 
     def search(self, request: SearchRequest) -> SearchResponse:
-        """Dispatch by request.mode. Hybrid without embedder → fts-only."""
+        """Dispatch by request.mode. Hybrid without embedder → fts-only.
+
+        Access direction (P1): the FIRST thing this method does is
+        converge ``request.scopes`` against the caller's visible scope
+        set. Convergence happens here — the single entry point — so the
+        fts-only and hybrid paths (and all 4 hybrid degradation paths)
+        operate on the same converged scopes. A boundary bug in one
+        path cannot leak because the scopes are fixed before dispatch.
+
+        On empty effective scopes, returns an empty SearchResponse
+        WITHOUT hitting the DB or embedder — fail-closed and cheap.
+        """
+        request = self._converge(request)
+        if not request.scopes and request.as_scope != Scope.USER:
+            # Convergence emptied the scope set for a non-USER actor
+            # (e.g. a PROJECT actor whose request.scopes named only
+            # 'user'). Nothing visible — return empty without querying.
+            # USER always has a non-empty visible set, so this never
+            # fires for the default identity.
+            return SearchResponse(results=[], total=0)
         if request.mode == SearchMode.HYBRID:
             if self._embedder is None:
                 # Hybrid requested but no embedder wired — degrade to
@@ -205,6 +286,40 @@ class SearchService:
                 return self._search_fts_only(request)
             return self._search_hybrid(request)
         return self._search_fts_only(request)
+
+    def _converge(self, request: SearchRequest) -> SearchRequest:
+        """Apply the access-direction trust boundary to request.scopes.
+
+        Returns a NEW SearchRequest with scopes intersected against the
+        visible set for ``request.as_scope`` (widened by grants from
+        ``access_repo`` if wired). The original request is not mutated.
+
+        Convergence rule::
+
+            visible    = visible_scopes(as_scope, grants)
+            effective  = request.scopes ∩ visible   (if scopes non-empty)
+            effective  = visible                     (if scopes empty)
+
+        Project-to-project isolation is enforced downstream by _Filters
+        (for the fts/hydrate path) and by VectorQuery (for the vector
+        leg), NOT here — it is row-level (depends on each item's
+        project_id), not scope-level.
+        """
+        grants: list = []
+        if self._access_repo is not None and request.as_scope != Scope.USER:
+            # USER sees everything by default; only non-USER actors can
+            # be widened by grants. list_grants returns only the grants
+            # matching (as_scope, as_project_id).
+            grants = self._access_repo.list_grants(
+                request.as_scope, request.as_project_id
+            )
+        visible = visible_scopes(request.as_scope, grants=grants)
+        if not request.scopes:
+            effective = visible
+        else:
+            visible_set = set(visible)
+            effective = [s for s in request.scopes if s in visible_set]
+        return replace(request, scopes=effective)
 
     # ---- fts-only path -----------------------------------------------
 
@@ -224,10 +339,7 @@ class SearchService:
             SearchQuery(query=request.query, limit=over_fetch)
         )
 
-        filters = _Filters(
-            scopes=_scope_set(request.scopes),
-            kinds=_kind_set(request.kinds),
-        )
+        filters = _filters_from(request)
 
         out: list[SearchResult] = []
         for hit in hits:
@@ -295,6 +407,12 @@ class SearchService:
                         limit=over_fetch,
                         scopes=[str(s) for s in request.scopes],
                         kinds=[str(k) for k in request.kinds],
+                        # P1: project isolation pushed down to SQL so a
+                        # PROJECT actor's vector hits are pre-filtered.
+                        # Empty for USER/GLOBAL (no isolation needed).
+                        project_id=request.as_project_id
+                        if request.as_scope == Scope.PROJECT
+                        else "",
                     )
                 ),
             )
@@ -337,10 +455,7 @@ class SearchService:
         """RRF-merge FTS + vector hits into a single ranked list."""
         # item_id → mutable accumulator. Same shape as Go's `*fusion`.
         fused: dict[str, dict[str, object]] = {}
-        filters = _Filters(
-            scopes=_scope_set(request.scopes),
-            kinds=_kind_set(request.kinds),
-        )
+        filters = _filters_from(request)
         # Cache hydrated items so IDs appearing in both FTS and vector
         # results only trigger one repo.get call.
         item_cache: dict[str, ContextItem] = {}

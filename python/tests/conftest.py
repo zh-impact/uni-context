@@ -54,7 +54,7 @@ def tmp_db() -> Iterator[sqlite3.Connection]:
 
 @pytest.fixture
 def migrated_db() -> Iterator[sqlite3.Connection]:
-    """Fresh :memory: DB with all migrations applied (schema_version='4').
+    """Fresh :memory: DB with all migrations applied (schema_version='5').
 
     Ready for storage-impl tests (Task 2.3+): the connection already has
     ``row_factory = scan_item`` set by :func:`open_db`, and the schema is

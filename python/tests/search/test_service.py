@@ -74,6 +74,7 @@ def _item(
     scope: Scope = Scope.USER,
     kind: Kind = Kind.NOTE,
     title: str = "",
+    project_id: str = "",
 ) -> ContextItem:
     """Build a minimal ContextItem for hydration."""
     return ContextItem(
@@ -81,6 +82,7 @@ def _item(
         scope=scope,
         kind=kind,
         title=title,
+        project_id=project_id,
     )
 
 
@@ -89,12 +91,18 @@ def _fixture(
     embedder=None,
     searcher: StubSearcher | None = None,
     leg_timeout: float | None = None,
+    access_repo=None,
 ) -> tuple[SearchService, FakeContextRepo, StubSearcher, StringIO]:
     repo = FakeContextRepo()
     searcher = searcher if searcher is not None else StubSearcher()
     log = StringIO()
     svc = SearchService(
-        searcher, repo, log=log, embedder=embedder, leg_timeout=leg_timeout
+        searcher,
+        repo,
+        log=log,
+        embedder=embedder,
+        leg_timeout=leg_timeout,
+        access_repo=access_repo,
     )
     return svc, repo, searcher, log
 
@@ -551,3 +559,296 @@ def test_rrf_formula_rank_advances_on_post_filter() -> None:
     # "in" is rank 0 after filter → score 1/60
     assert response.results[0].item.id == "in"
     assert response.results[0].score == pytest.approx(1.0 / RRF_K)
+
+
+# ===========================================================================
+# P1: Access direction — scope convergence + project isolation.
+#
+# These are the LOAD-BEARING trust-boundary tests. The first one
+# (test_project_actor_cannot_see_user_scope) is the anti-leak regression
+# guard: it must NEVER pass if a PROJECT actor can read USER-scope data.
+# ===========================================================================
+
+
+def test_project_actor_cannot_see_user_scope() -> None:
+    """LOAD-BEARING: a PROJECT actor must NEVER receive USER-scope items.
+
+    This is the core anti-leak guarantee of the access direction. If it
+    ever fails, user private data is leaking to project agents. The
+    FTS leg returns a user-scope hit, but convergence removes 'user'
+    from the PROJECT actor's visible set, so the hit is dropped.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="secret", score=2.0),   # user scope — private
+            SearchHit(id="shared", score=1.0),   # global scope — visible
+        ]
+    )
+    access = FakeAccessRepo()  # no grants → default floor only
+    svc, repo, _, _ = _fixture(searcher=searcher, access_repo=access)
+    repo.items["secret"] = _item("secret", scope=Scope.USER)
+    repo.items["shared"] = _item("shared", scope=Scope.GLOBAL)
+
+    response = svc.search(
+        SearchRequest(query="x", as_scope=Scope.PROJECT, as_project_id="P")
+    )
+
+    assert response.total == 1
+    assert response.results[0].item.id == "shared"
+    # The user-scope item must not appear anywhere in results.
+    assert all(r.item.scope != Scope.USER for r in response.results)
+
+
+def test_global_actor_sees_only_global() -> None:
+    """A GLOBAL actor sees only global-scope items, not user or project."""
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="u", score=3.0),
+            SearchHit(id="p", score=2.0),
+            SearchHit(id="g", score=1.0),
+        ]
+    )
+    svc, repo, _, _ = _fixture(searcher=searcher, access_repo=FakeAccessRepo())
+    repo.items["u"] = _item("u", scope=Scope.USER)
+    repo.items["p"] = _item("p", scope=Scope.PROJECT, project_id="P")
+    repo.items["g"] = _item("g", scope=Scope.GLOBAL)
+
+    response = svc.search(SearchRequest(query="x", as_scope=Scope.GLOBAL))
+
+    assert response.total == 1
+    assert response.results[0].item.id == "g"
+
+
+def test_user_actor_default_sees_everything() -> None:
+    """USER (the default identity) sees all scopes — legacy behavior preserved.
+
+    This pins backward compatibility: callers that never set as_scope
+    get the pre-P1 "no boundary" behavior. The convergence is a no-op
+    for USER because its default visible set is {user, project, global}.
+    """
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="u", score=3.0),
+            SearchHit(id="p", score=2.0),
+            SearchHit(id="g", score=1.0),
+        ]
+    )
+    # No access_repo wired — convergence still applies the USER default.
+    svc, repo, _, _ = _fixture(searcher=searcher)
+    repo.items["u"] = _item("u", scope=Scope.USER)
+    repo.items["p"] = _item("p", scope=Scope.PROJECT, project_id="P")
+    repo.items["g"] = _item("g", scope=Scope.GLOBAL)
+
+    response = svc.search(SearchRequest(query="x"))
+
+    assert response.total == 3
+
+
+def test_project_actor_with_grant_can_see_user_scope() -> None:
+    """A grant widens a PROJECT actor's visible set to include USER.
+
+    Grants only ever widen, never narrow. With a grant targeting
+    target_scope=USER, the PROJECT actor now sees user-scope items too.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+    from unictx.items.models import AccessGrant
+
+    access = FakeAccessRepo(
+        grants=[
+            AccessGrant(
+                as_scope=Scope.PROJECT,
+                project_id="P",
+                target_scope=Scope.USER,
+            )
+        ]
+    )
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="secret", score=2.0),
+            SearchHit(id="shared", score=1.0),
+        ]
+    )
+    svc, repo, _, _ = _fixture(searcher=searcher, access_repo=access)
+    repo.items["secret"] = _item("secret", scope=Scope.USER)
+    repo.items["shared"] = _item("shared", scope=Scope.GLOBAL)
+
+    response = svc.search(
+        SearchRequest(query="x", as_scope=Scope.PROJECT, as_project_id="P")
+    )
+
+    # Both visible now: user (via grant) + global (default).
+    assert {r.item.id for r in response.results} == {"secret", "shared"}
+
+
+def test_project_isolation_blocks_other_projects() -> None:
+    """A PROJECT actor sees only its own project_id's project-scope rows.
+
+    Project P cannot see project Q's items, even though both are
+    project scope. Global rows remain shared.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="mine", score=3.0),
+            SearchHit(id="theirs", score=2.0),
+            SearchHit(id="shared", score=1.0),
+        ]
+    )
+    svc, repo, _, _ = _fixture(searcher=searcher, access_repo=FakeAccessRepo())
+    repo.items["mine"] = _item("mine", scope=Scope.PROJECT, project_id="P")
+    repo.items["theirs"] = _item("theirs", scope=Scope.PROJECT, project_id="Q")
+    repo.items["shared"] = _item("shared", scope=Scope.GLOBAL)
+
+    response = svc.search(
+        SearchRequest(query="x", as_scope=Scope.PROJECT, as_project_id="P")
+    )
+
+    assert {r.item.id for r in response.results} == {"mine", "shared"}
+    assert "theirs" not in {r.item.id for r in response.results}
+
+
+def test_project_isolation_in_hybrid_vector_leg() -> None:
+    """Project isolation also applies to the vector leg in hybrid mode.
+
+    The vector query's project_id is pushed down so a PROJECT actor's
+    KNN hits are pre-filtered at SQL. Here we assert the VectorQuery
+    carries the actor's project_id for a PROJECT identity.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    embedder = FakeEmbedder(dimension=8)
+    searcher = StubSearcher(
+        vec_hits=[VectorHit(id="v", distance=0.1, score=0.95)]
+    )
+    svc, repo, searcher, _ = _fixture(
+        embedder=embedder, searcher=searcher, access_repo=FakeAccessRepo()
+    )
+    repo.items["v"] = _item("v", scope=Scope.PROJECT, project_id="P")
+
+    svc.search(
+        SearchRequest(
+            query="x",
+            mode=SearchMode.HYBRID,
+            as_scope=Scope.PROJECT,
+            as_project_id="P",
+        )
+    )
+
+    assert len(searcher.vec_calls) == 1
+    assert searcher.vec_calls[0].project_id == "P"
+
+
+def test_user_actor_vector_leg_has_no_project_id() -> None:
+    """A USER actor's vector query carries no project_id (no isolation needed).
+
+    Confirms the project_id pushdown is PROJECT-only — USER sees all.
+    """
+    embedder = FakeEmbedder(dimension=8)
+    searcher = StubSearcher(vec_hits=[])
+    svc, repo, searcher, _ = _fixture(embedder=embedder, searcher=searcher)
+
+    svc.search(SearchRequest(query="x", mode=SearchMode.HYBRID))
+
+    assert len(searcher.vec_calls) == 1
+    assert searcher.vec_calls[0].project_id == ""
+
+
+def test_project_actor_with_empty_visible_returns_without_querying() -> None:
+    """When convergence empties the scope set, search returns early (no DB hit).
+
+    A PROJECT actor requesting scopes=[user] only has that single scope
+    intersected away to nothing. The service must short-circuit and NOT
+    call the searcher at all — fail-closed and cheap.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    searcher = StubSearcher(fts_hits=[SearchHit(id="leak", score=1.0)])
+    svc, repo, searcher, _ = _fixture(
+        searcher=searcher, access_repo=FakeAccessRepo()
+    )
+    repo.items["leak"] = _item("leak", scope=Scope.USER)
+
+    response = svc.search(
+        SearchRequest(
+            query="x",
+            scopes=[Scope.USER],  # PROJECT actor requests user → emptied
+            as_scope=Scope.PROJECT,
+            as_project_id="P",
+        )
+    )
+
+    assert response.total == 0
+    # The searcher was never consulted — convergence short-circuited.
+    assert searcher.fts_calls == []
+
+
+def test_convergence_preserved_through_hybrid_degradation() -> None:
+    """The boundary holds even when hybrid degrades to fts-only.
+
+    embed failure → fts-only fallback must STILL honor the boundary:
+    a PROJECT actor must not leak USER data through the degraded path.
+    This is the key invariant of putting convergence at search() entry
+    rather than in each path.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+
+    embedder = ErrorEmbedder(inner=FakeEmbedder(dimension=8))
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="secret", score=2.0),
+            SearchHit(id="shared", score=1.0),
+        ]
+    )
+    svc, repo, searcher, log = _fixture(
+        embedder=embedder, searcher=searcher, access_repo=FakeAccessRepo()
+    )
+    repo.items["secret"] = _item("secret", scope=Scope.USER)
+    repo.items["shared"] = _item("shared", scope=Scope.GLOBAL)
+
+    response = svc.search(
+        SearchRequest(
+            query="x",
+            mode=SearchMode.HYBRID,
+            as_scope=Scope.PROJECT,
+            as_project_id="P",
+        )
+    )
+
+    # Degraded to fts-only (embed failed) but still boundary-safe.
+    assert "embed failed" in log.getvalue()
+    assert all(r.item.scope != Scope.USER for r in response.results)
+    assert {r.item.id for r in response.results} == {"shared"}
+
+
+def test_grant_only_widens_never_narrows_for_user() -> None:
+    """A grant cannot reduce a USER actor's visible set.
+
+    USER sees everything by default; a stray grant (e.g. targeting
+    global) is a no-op. This pins the "grants only widen" rule.
+    """
+    from tests._fakes.fake_access_repo import FakeAccessRepo
+    from unictx.items.models import AccessGrant
+
+    access = FakeAccessRepo(
+        grants=[AccessGrant(as_scope=Scope.USER, target_scope=Scope.GLOBAL)]
+    )
+    searcher = StubSearcher(
+        fts_hits=[
+            SearchHit(id="u", score=3.0),
+            SearchHit(id="p", score=2.0),
+            SearchHit(id="g", score=1.0),
+        ]
+    )
+    svc, repo, _, _ = _fixture(searcher=searcher, access_repo=access)
+    repo.items["u"] = _item("u", scope=Scope.USER)
+    repo.items["p"] = _item("p", scope=Scope.PROJECT, project_id="P")
+    repo.items["g"] = _item("g", scope=Scope.GLOBAL)
+
+    response = svc.search(SearchRequest(query="x", as_scope=Scope.USER))
+
+    assert response.total == 3  # unchanged — grant didn't narrow

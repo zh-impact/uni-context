@@ -1,9 +1,9 @@
 """Tests for :mod:`unictx.storage.migrations_runner`.
 
-Covers: full migration applies version 4; idempotency; expected tables
-present; version parser; FTS5 hint detection; non-FTS5 passthrough; and
-a skip-guarded smoke test against the Go-written DB if present on this
-machine.
+Covers: full migration applies the latest version; idempotency; expected
+tables present; version parser; FTS5 hint detection; non-FTS5 passthrough;
+and a skip-guarded smoke test against the Go-written DB if present on
+this machine.
 """
 
 from __future__ import annotations
@@ -22,8 +22,12 @@ from unictx.storage.migrations_runner import (
 )
 
 
-def test_migrate_applies_all_four() -> None:
-    """After ``migrate``, ``schema_meta.schema_version`` must be '4'."""
+def test_migrate_applies_all() -> None:
+    """After ``migrate``, ``schema_meta.schema_version`` must be the latest.
+
+    The version tracks the highest migration applied; bump this constant
+    whenever a new migration file is added.
+    """
     db = open_db(":memory:")
     try:
         migrate(db)
@@ -31,7 +35,7 @@ def test_migrate_applies_all_four() -> None:
     finally:
         db.close()
     assert row is not None
-    assert row[0] == "4"
+    assert row[0] == "5"
 
 
 def test_migrate_idempotent() -> None:
@@ -46,7 +50,7 @@ def test_migrate_idempotent() -> None:
         ).fetchone()
     finally:
         db.close()
-    assert version == "4"
+    assert version == "5"
 
 
 def test_migrate_creates_expected_tables() -> None:
@@ -141,15 +145,14 @@ _GO_DB_PATH = Path.home() / ".local" / "share" / "unictx" / "unictx.db"
     not _GO_DB_PATH.exists(),
     reason="no Go DB on this machine (developer smoke test, not CI)",
 )
-def test_migrate_go_db_is_noop() -> None:
-    """``migrate`` against an existing Go DB at version 4 is a no-op.
+def test_migrate_go_db_advances_to_latest() -> None:
+    """``migrate`` brings an existing Go DB (v=4) up to the latest version.
 
-    The Go DB lives at ``~/.local/share/unictx/unictx.db``. CI machines
-    don't have it; this only runs on developer machines where it exists.
-
-    Read-write is fine here — ``migrate`` should not modify a fully-
-    migrated DB. (If we wanted to be extra-defensive we could open
-    read-only, but the runner correctly no-ops on a v=4 DB.)
+    The Go DB lives at ``~/.local/share/unictx/unictx.db`` and was last
+    written by the Go build at v=4. After Python migration 0005, the
+    runner advances it to v=5 (additive — only creates access_grant).
+    CI machines don't have it; this only runs on developer machines
+    where it exists. Read-write is fine: 0005 is a pure CREATE TABLE.
     """
     db = open_db(_GO_DB_PATH)
     try:
@@ -159,4 +162,4 @@ def test_migrate_go_db_is_noop() -> None:
         ).fetchone()
     finally:
         db.close()
-    assert version == "4"
+    assert version == "5"

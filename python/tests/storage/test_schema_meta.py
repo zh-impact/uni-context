@@ -5,8 +5,8 @@ path plus a missing-row path).
 
 The fixture ``migrated_db`` (tests/conftest.py) yields a fresh
 ``:memory:`` connection with all migrations applied. The migration
-runner seeds ``schema_meta.schema_version='4'`` once migration 0004
-completes, so ``SchemaMetaImpl.version()`` should return ``"4"``.
+runner seeds ``schema_meta.schema_version='5'`` once migration 0005
+completes, so ``SchemaMetaImpl.version()`` should return ``"5"``.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ class TestVersion:
         migrated_db: sqlite3.Connection,
     ) -> None:
         """``version()`` returns the row the migrations runner seeded."""
-        # The latest migration is 0004 → '4'.
-        assert SchemaMetaImpl(migrated_db).version() == "4"
+        # The latest migration is 0005 → '5'.
+        assert SchemaMetaImpl(migrated_db).version() == "5"
 
     def test_version_missing_row_raises_schema_meta_not_found(
         self,

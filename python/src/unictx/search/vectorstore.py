@@ -18,6 +18,13 @@ class VectorQuery:
     Filters (scopes, kinds) are pushed down to context_item via JOIN in
     the sqlite impl. Empty list = no filter on that dimension.
 
+    project_id (P1 access direction): when non-empty AND the query is
+    scoped to PROJECT actors, the sqlite impl adds a row-level
+    predicate so a PROJECT actor only sees its own project's vectors.
+    The service layer sets this from SearchRequest.as_project_id when
+    as_scope==PROJECT; it stays "" for USER/GLOBAL actors (no isolation
+    needed). An empty string means "no project_id filter".
+
     Note on `vector` type: Go uses `[]float32`. We use `list[float]` —
     concrete and matches Go's concreteness. `Sequence[float]` was
     considered but rejected because it would accept tuples/iterators
@@ -30,6 +37,7 @@ class VectorQuery:
     limit: int = 0
     scopes: list[str] = field(default_factory=list)
     kinds: list[str] = field(default_factory=list)
+    project_id: str = ""
 
 
 @dataclass(slots=True)

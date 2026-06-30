@@ -301,3 +301,135 @@ def _is_cjk(r: str) -> bool:
 def _now_unix() -> int:
     """Current UTC time as integer unix timestamp."""
     return int(datetime.now(UTC).timestamp())
+
+
+# ---------------------------------------------------------------------------
+# Access direction (P1 trust boundary)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class AccessGrant:
+    """One row of the ``access_grant`` table.
+
+    A grant EXTENDS the default visible_scopes for an actor — it can
+    only widen, never narrow, the default set. See migration 0005 and
+    :func:`visible_scopes`.
+
+    Fields:
+        as_scope: the actor's identity scope this grant applies to.
+            Only ``project`` / ``global`` — ``user`` is the innermost
+            layer and sees everything by default, so a user grant is
+            meaningless.
+        project_id: empty string = the grant applies to ALL projects
+            acting with this as_scope; non-empty = only that specific
+            project. (The DB stores NULL for "all"; this dataclass uses
+            "" to stay consistent with the rest of the domain's
+            string-typed optional fields.)
+        target_scope: the scope whose data the actor may now see
+            (``user`` | ``project`` | ``global``).
+        reason: optional human-readable justification (audit trail). The
+            DB stores it verbatim; ``visible_scopes`` ignores it. Empty
+            by default for grants created without an explicit reason.
+    """
+
+    as_scope: Scope = Scope.GLOBAL
+    project_id: str = ""
+    target_scope: Scope = Scope.GLOBAL
+    reason: str = ""
+
+
+# Default visible scope sets per access identity. The access identity is
+# "who is asking"; the innermost layer (user) sees the most, the
+# outermost (global) sees the least. This is the unbreakable floor that
+# visible_scopes() returns before grants widen it.
+#
+# project_id isolation is NOT encoded here: PROJECT actors see the whole
+# ``project`` scope dimension, but the caller enforces (at the SQL /
+# filter layer) that a PROJECT actor only sees rows whose project_id
+# matches the actor's. global rows are never project-scoped.
+_DEFAULT_VISIBLE: dict[Scope, list[Scope]] = {
+    Scope.USER: [Scope.USER, Scope.PROJECT, Scope.GLOBAL],
+    Scope.PROJECT: [Scope.PROJECT, Scope.GLOBAL],
+    Scope.GLOBAL: [Scope.GLOBAL],
+}
+
+
+def visible_scopes(
+    as_scope: Scope,
+    grants: list[AccessGrant] | None = None,
+) -> list[Scope]:
+    """Return the visible scope set for an access identity, widened by grants.
+
+    Pure function — the single source of truth for the default access
+    floor. No IO; trivially unit-testable.
+
+    Default rule (the unbreakable floor; an access identity further out
+    sees a subset of what a more-inner identity sees)::
+
+        USER    -> [user, project, global]   # innermost, sees all
+        PROJECT -> [project, global]          # cannot see user's private data
+        GLOBAL  -> [global]                   # outermost, sees only global
+
+    Grants can only widen: any grant whose ``as_scope`` matches is
+    applied, adding its ``target_scope`` to the visible set. A grant
+    whose ``project_id`` is set is still applied here — project-level
+    restriction is the caller's responsibility (the caller knows which
+    project it is acting as, so it filters the grant list before calling
+    or passes only the relevant grants).
+
+    Returns scopes in :class:`Scope` declaration order (USER, PROJECT,
+    GLOBAL), deduplicated. This stable ordering keeps test assertions
+    deterministic.
+
+    Note on PROJECT isolation: this function deliberately returns the
+    full ``project`` scope dimension for a PROJECT actor. The
+    project-to-project isolation (a PROJECT actor only sees rows whose
+    ``project_id`` matches its own) is enforced downstream via SQL
+    predicates / filter acceptance, not here — because that restriction
+    is row-level (depends on each item's project_id), not scope-level.
+    """
+    # Start from the default floor. Unknown as_scope falls back to the
+    # most restrictive (global) — fail-closed, never leak.
+    visible = list(_DEFAULT_VISIBLE.get(as_scope, _DEFAULT_VISIBLE[Scope.GLOBAL]))
+
+    if not grants:
+        return _dedup_scopes(visible)
+
+    seen = set(visible)
+    for grant in grants:
+        # A grant only applies to actors matching its as_scope. We do
+        # not filter by project_id here — the caller passes only the
+        # grants relevant to the acting project (or passes all and
+        # accepts that a project-scoped grant widens this actor only
+        # when the actor's project matches, which the caller enforces
+        # by pre-filtering). Keeping this function pure + project-blind
+        # means the rule is testable without constructing projects.
+        if grant.as_scope != as_scope:
+            continue
+        if grant.target_scope not in seen:
+            seen.add(grant.target_scope)
+            visible.append(grant.target_scope)
+
+    return _dedup_scopes(visible)
+
+
+def _dedup_scopes(scopes: list[Scope]) -> list[Scope]:
+    """De-duplicate scopes, preserving the :class:`Scope` declaration order.
+
+    The declaration order (USER, PROJECT, GLOBAL) is the canonical order
+    returned by visible_scopes; this keeps the output stable regardless
+    of how grants were ordered in the input list.
+    """
+    seen: set[Scope] = set()
+    out: list[Scope] = []
+    for scope in scopes:
+        if scope in seen:
+            continue
+        seen.add(scope)
+        out.append(scope)
+    # Re-sort by declaration order so output is deterministic regardless
+    # of grant insertion order.
+    order = {Scope.USER: 0, Scope.PROJECT: 1, Scope.GLOBAL: 2}
+    out.sort(key=lambda s: order[s])
+    return out

@@ -15,6 +15,7 @@ Registration styles:
 
 from __future__ import annotations
 
+from unictx.cli.access_cmd import access_app
 from unictx.cli.app import app
 from unictx.cli.doctor import doctor as _doctor_cmd
 from unictx.cli.embed_cmd import embed_app
@@ -27,6 +28,8 @@ app.add_typer(user_app, name="user")
 # `embed` registers as a Typer with subcommands (model/switch/backfill/
 # worker/reembed/status).
 app.add_typer(embed_app, name="embed")
+# `access` registers as a Typer with subcommands (grant add/list/remove).
+app.add_typer(access_app, name="access")
 # Direct top-level commands. Imported under private aliases so the
 # public ``unictx.cli.<name>`` binding stays on the submodule (tests
 # do ``import unictx.cli.search as search_mod`` to monkeypatch the

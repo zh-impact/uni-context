@@ -42,11 +42,13 @@ from unictx.embed.model_service import ModelService
 from unictx.embed.reembed import ReembedService
 from unictx.embed.service import EmbedService
 from unictx.embed.worker import WorkerService
+from unictx.items.access_service import AccessService
 from unictx.items.ingest import IngestService
 from unictx.items.item_service import ItemService
 from unictx.items.reindex_fts import ReindexFTSService
 from unictx.pdf.factory import build_pdf_extractor
 from unictx.search.service import SearchService
+from unictx.storage.access_repo_impl import AccessRepoImpl
 from unictx.storage.db import open_db
 from unictx.storage.embedding_repo_impl import EmbeddingRepoImpl
 from unictx.storage.filestore import FileStoreImpl
@@ -93,6 +95,13 @@ class AppContainer:
     search: SearchService
     reindex_fts: ReindexFTSService
     diagnostics: DiagnosticService
+    # P1 access-direction: read-side grant lookup. Exposed on the
+    # container so a future grant-management CLI can share it; for now
+    # only SearchService consumes it for scope convergence.
+    access: AccessRepoImpl
+    # P1.1 access management: application-layer service backing the
+    # ``access grant add|list|remove`` CLI commands.
+    access_svc: AccessService
     # Embed-pipeline services. None when embedder is disabled.
     embed: EmbedService | None
     models: ModelService | None
@@ -214,6 +223,9 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
         fs = FileStoreImpl(cfg.data_dir / "filestore")
         registry = ModelRegistryImpl(db)
         schema_meta = SchemaMetaImpl(db)
+        # P1 access direction: read-side grant lookup, shared with
+        # SearchService for scope convergence.
+        access_repo = AccessRepoImpl(db)
 
         # PDF extractor — None when PDF is unconfigured.
         pdf_extractor = build_pdf_extractor(cfg.pdf)
@@ -247,9 +259,15 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
         # Services constructed unconditionally — they exist in every plan.
         ingest = IngestService(repo, fs, log=log, embed=embed_svc, pdf_extractor=pdf_extractor)
         items = ItemService(repo, fs)
-        search = SearchService(searcher, repo, log=log, embedder=embedder)
+        search = SearchService(
+            searcher, repo, log=log, embedder=embedder, access_repo=access_repo
+        )
         reindex_fts = ReindexFTSService(repo, fs, log=log)
         diagnostics = DiagnosticService(schema_meta, embedder=embedder)
+        # P1.1 access management service — always constructed (grants
+        # matter in every plan). Wraps access_repo so the CLI never
+        # imports storage impls directly.
+        access_svc = AccessService(access_repo)
 
         return AppContainer(
             config=cfg,
@@ -259,6 +277,8 @@ def wire(cfg: Config, *, log: IO[str] | None = None) -> AppContainer:
             search=search,
             reindex_fts=reindex_fts,
             diagnostics=diagnostics,
+            access=access_repo,
+            access_svc=access_svc,
             embed=embed_svc,
             models=models,
             backfill=backfill,

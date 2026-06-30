@@ -197,7 +197,7 @@ def test_search_invalid_kind_rejected(container_factory) -> None:
 
 
 def test_search_json_output(container_factory) -> None:
-    """--json → emits {results, total, mode} JSON envelope."""
+    """--json → emits {results, total, mode, as_scope} JSON envelope."""
     runner = CliRunner()
     _seed_notes(runner, "python is great")
     result = runner.invoke(root_app, ["--json", "search", "python"])
@@ -209,7 +209,80 @@ def test_search_json_output(container_factory) -> None:
     payload = _json.loads(out[brace:])
     assert payload["total"] >= 1
     assert payload["mode"] == "fts-only"
+    assert payload["as_scope"] == "user"  # default identity echoed
     assert isinstance(payload["results"], list)
     if payload["results"]:
         assert "id" in payload["results"][0]
         assert "score" in payload["results"][0]
+
+
+# ===========================================================================
+# P1: access direction CLI flags (--as / --project).
+# ===========================================================================
+
+
+def test_search_as_project_requires_project_flag(container_factory) -> None:
+    """--as project without --project → exit 2 with a clear message."""
+    runner = CliRunner()
+    result = runner.invoke(root_app, ["search", "x", "--as", "project"])
+    assert result.exit_code == 2
+    assert "--project" in result.output
+
+
+def test_search_invalid_as_scope_rejected(container_factory) -> None:
+    """--as bogus → exit 2 with valid-set echoed."""
+    runner = CliRunner()
+    result = runner.invoke(root_app, ["search", "x", "--as", "bogus"])
+    assert result.exit_code == 2
+    assert "--as" in result.output
+
+
+def test_search_as_global_hides_user_data(container_factory) -> None:
+    """--as global → user-scope notes are NOT returned.
+
+    The CLI-level anti-leak: a global-identity search must not surface
+    user private notes. We seed a user note (via the normal add path)
+    plus a global item (via the repo directly), then search as global.
+    """
+    runner = CliRunner()
+    # User-scope note (private) — seeded via the CLI add path.
+    _seed_notes(runner, "secret user note")
+    # Global-scope item — seeded directly via the repo.
+    from unictx.items.models import Kind, NewItemParams, Scope, Source, new_context_item
+
+    container = container_factory()
+    try:
+        g = new_context_item(
+            Scope.GLOBAL, Kind.NOTE, Source.MANUAL, NewItemParams(),
+            title="shared global rule", content="shared global rule",
+        )
+        container.items._repo.create(g)
+    finally:
+        container.close()
+
+    result = runner.invoke(root_app, ["search", "shared", "--as", "global"])
+    assert result.exit_code == 0, result.output
+    # The global item appears; the user "secret" does not.
+    assert "shared global rule" in result.output
+    assert "secret" not in result.output
+
+
+def test_search_as_user_default_sees_everything(container_factory) -> None:
+    """No --as flag → default user identity sees all scopes (backward compat)."""
+    runner = CliRunner()
+    _seed_notes(runner, "user note here")
+    from unictx.items.models import Kind, NewItemParams, Scope, Source, new_context_item
+
+    container = container_factory()
+    try:
+        g = new_context_item(
+            Scope.GLOBAL, Kind.NOTE, Source.MANUAL, NewItemParams(),
+            title="global note", content="global note",
+        )
+        container.items._repo.create(g)
+    finally:
+        container.close()
+
+    # No --as → default user, sees both user and global.
+    result = runner.invoke(root_app, ["search", "note"])
+    assert result.exit_code == 0, result.output

@@ -2,6 +2,84 @@
 
 Notable changes and known limitations per release. Dates are YYYY-MM-DD.
 
+## 2026-07-01 — P1 access direction (trust boundary + grant management)
+
+Built the missing trust boundary so retrieval respects the caller's
+**access identity** (`as_scope`). Required before P3 (auto-ingest by
+agents) — once an agent can write, it must also be bounded on read.
+
+**Permission model** (three scope layers, outer sees less):
+
+```
+as=USER    → {user, project, global}   (innermost, sees all — default)
+as=PROJECT → {project, global} + own project_id only
+as=GLOBAL  → {global}                   (outermost)
+```
+
+Grants only widen, never narrow. Project-to-project isolation is enforced
+at row level (`project_id=?`), not at scope level.
+
+**Single convergence point** — `SearchService.search()` calls
+`_converge()` *before* dispatching, so all four hybrid-degradation paths
+(embed fail / vector timeout / fts timeout / no-embedder) operate on the
+same converged scopes. A boundary bug in any one path cannot leak
+because the scopes are fixed before dispatch.
+
+**Shipped:**
+
+- **Migration `0005_access_grants.sql`** — table `access_grant` with
+  `(as_scope, project_id NULL, target_scope, reason, created_at)` +
+  lookup index. Schema version bumped to 5.
+- **`visible_scopes()` pure function** (`items/models.py`) — single
+  source of truth for the default floor; grants widen it. Pure/no-IO.
+  **Deviation from plan:** signature is `(as_scope, grants)`, not
+  `(as_scope, as_project_id, grants)` — `project_id` is a row-level
+  predicate, not a scope-level one, and lives in SQL / `_Filters`
+  instead. Cleaner separation of "scope visibility" (pure) from
+  "row-level project isolation" (filter/SQL).
+- **`AccessRepo` Protocol + `AccessRepoImpl`** — read side
+  (`list_grants`) backs convergence; write side (`grant`/`revoke`/
+  `list_all_grants`) backs management CLI.
+- **`SearchService._converge()`** — the single entry-point convergence.
+  Empty effective scopes for a non-USER actor → empty response without
+  hitting the DB (fail-closed + cheap).
+- **`_Filters` extension** — PROJECT actor rejects project-scope rows
+  from other `project_id`s; global rows always pass.
+- **CLI `--as`/`--project`** flags on `search` — `--as project` requires
+  `--project` (exit 2 on violation).
+- **P1.1 grant management CLI** (beyond original plan's deferral):
+  `access grant add|list|remove` backed by `AccessService` (application-
+  layer boundary, mirrors `ModelService` — keeps `cli/*` free of
+  `storage/*_impl` imports per `test_no_direct_storage_import.py`).
+  `--as user` rejected (USER sees everything by default; user grants are
+  meaningless). `--project` optional on `add` (NULL = all projects).
+  `remove` is idempotent.
+
+**Anti-leak regression guard (load-bearing):**
+`tests/search/test_service.py::test_project_actor_cannot_see_user_scope`
+— must NEVER fail; failure means user private data is leaking to project
+agents.
+
+**Tests:** P1 added **66 net** (586 → 652 passed / 3 skipped). 131 P1-
+specific test points across models / service / repo / cli / access-cmd.
+
+**Invariants preserved:**
+
+- Convergence is the only place scopes change — degradation paths cannot
+  bypass it.
+- Grants only widen, never narrow.
+- `USER` is the default identity (legacy callers see the old "no
+  boundary" behavior).
+- Project isolation is row-level, enforced at the SQL/Filter layer, not
+  mixed into `visible_scopes`.
+
+**Out of scope (deferred):**
+
+- Write-side authorization (who can write to which scope).
+- Visibility enum consumption (`private`/`project`/`public` stay
+  dormant).
+- Cross-user isolation (single-user system).
+
 ## 2026-06-28 — Post-migration review fixes
 
 Three findings from a code review of the completed Python port:

@@ -61,7 +61,9 @@ class CompositeSearcher:
         """vec0 KNN search via VectorStoreImpl.
 
         Mirrors the Phase 2 signature: positional ``vector`` + ``model``
-        + ``limit``, keyword-only ``scopes`` + ``kinds``.
+        + ``limit``, keyword-only ``scopes`` + ``kinds`` + ``project_id``.
+        The ``project_id`` keyword (P1 access direction) is forwarded
+        so a PROJECT actor's row-level isolation is pushed down to SQL.
         """
         return self._vs.search(
             q.vector,
@@ -69,4 +71,5 @@ class CompositeSearcher:
             q.limit,
             scopes=q.scopes,
             kinds=q.kinds,
+            project_id=q.project_id,
         )

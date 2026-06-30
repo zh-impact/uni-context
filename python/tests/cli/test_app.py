@@ -29,7 +29,6 @@ from unictx.cli.app import (
     wire,
 )
 from unictx.config import Config, EmbedderConfig
-from unictx.embed.errors import ModelNotFound
 
 # ---------------------------------------------------------------------------
 # wire() — container factory
@@ -82,7 +81,7 @@ def test_wire_runs_migrations(tmp_path: Path) -> None:
     container = wire(cfg)
     try:
         # DiagnosticService pulls schema_version from schema_meta.
-        assert container.diagnostics.schema_version() == "4"
+        assert container.diagnostics.schema_version() == "5"
         # context_item table exists (migration 0001 creates it).
         row = container.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='context_item'"

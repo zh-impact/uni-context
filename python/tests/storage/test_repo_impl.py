@@ -375,6 +375,72 @@ def test_list_filters_by_scope(migrated_db: sqlite3.Connection) -> None:
     assert {r.id for r in rows} == {"u", "p"}
 
 
+def test_list_project_isolation_restricts_to_own_project(
+    migrated_db: sqlite3.Connection,
+) -> None:
+    """P1: a PROJECT actor sees only its own project_id's project rows + global.
+
+    Project P cannot see project Q's items. Global rows stay shared.
+    Mirrors the SearchService project-isolation rule, but enforced at
+    the SQL layer via the (project_id=? OR scope='global') predicate.
+    """
+    repo = ContextRepoImpl(migrated_db)
+    # Two projects, each with its own item, plus a shared global item.
+    migrated_db.execute(
+        "INSERT INTO project (id, name, path, description, created_at, updated_at) "
+        "VALUES ('P', 'P', '', '', 1700000000, 1700000000),"
+        "       ('Q', 'Q', '', '', 1700000000, 1700000000)"
+    )
+    repo.create(_full_item(id="mine", scope=Scope.PROJECT, owner_user_id="", project_id="P"))
+    repo.create(_full_item(id="theirs", scope=Scope.PROJECT, owner_user_id="", project_id="Q"))
+    repo.create(_full_item(id="shared", scope=Scope.GLOBAL, owner_user_id="", project_id=""))
+
+    # Project P acting: sees its own + global, NOT Q's.
+    rows, _ = repo.list(
+        ItemFilter(
+            scopes=[Scope.PROJECT, Scope.GLOBAL],
+            as_scope=Scope.PROJECT,
+            as_project_id="P",
+            limit=10,
+        )
+    )
+    assert {r.id for r in rows} == {"mine", "shared"}
+    assert "theirs" not in {r.id for r in rows}
+
+    # Project Q acting: sees its own + global, NOT P's.
+    rows, _ = repo.list(
+        ItemFilter(
+            scopes=[Scope.PROJECT, Scope.GLOBAL],
+            as_scope=Scope.PROJECT,
+            as_project_id="Q",
+            limit=10,
+        )
+    )
+    assert {r.id for r in rows} == {"theirs", "shared"}
+
+
+def test_list_user_actor_no_project_isolation(migrated_db: sqlite3.Connection) -> None:
+    """P1: a USER actor (default) applies no project_id predicate.
+
+    USER sees all projects' project rows when scopes include PROJECT —
+    no isolation. Confirms the predicate only fires for as_scope=PROJECT.
+    """
+    repo = ContextRepoImpl(migrated_db)
+    migrated_db.execute(
+        "INSERT INTO project (id, name, path, description, created_at, updated_at) "
+        "VALUES ('P', 'P', '', '', 1700000000, 1700000000),"
+        "       ('Q', 'Q', '', '', 1700000000, 1700000000)"
+    )
+    repo.create(_full_item(id="pp", scope=Scope.PROJECT, owner_user_id="", project_id="P"))
+    repo.create(_full_item(id="qq", scope=Scope.PROJECT, owner_user_id="", project_id="Q"))
+
+    rows, _ = repo.list(
+        ItemFilter(scopes=[Scope.PROJECT], as_scope=Scope.USER, limit=10)
+    )
+    # USER sees both projects — no isolation.
+    assert {r.id for r in rows} == {"pp", "qq"}
+
+
 def test_list_filters_by_kind(migrated_db: sqlite3.Connection) -> None:
     """kinds filter restricts to items whose kind is in the supplied set."""
     repo = ContextRepoImpl(migrated_db)
@@ -720,7 +786,7 @@ def test_scan_item_passes_through_non_context_item_selects(
         "SELECT key, value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert isinstance(row, tuple)
-    assert row == ("schema_version", "4")
+    assert row == ("schema_version", "5")
 
     # PRAGMA probe — same.
     (fk,) = migrated_db.execute("PRAGMA foreign_keys").fetchone()

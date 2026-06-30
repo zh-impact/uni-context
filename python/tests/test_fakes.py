@@ -18,13 +18,14 @@ import hashlib
 import pytest
 
 from tests._fakes.canned_filestore import CannedFileStore
+from tests._fakes.fake_access_repo import FakeAccessRepo
 from tests._fakes.fake_embedder import ErrorEmbedder, FakeEmbedder
 from tests._fakes.fake_repo import FakeContextRepo
 from unictx.embed.embedder import Embedder, ModelInfo
 from unictx.embed.errors import EmbeddingFailed
 from unictx.items.errors import ExternalizedContentMissing, ItemNotFound, ItemValidationError
-from unictx.items.models import Kind, NewItemParams, Scope, Source, new_context_item
-from unictx.items.repo import ContextRepo, ItemFilter
+from unictx.items.models import AccessGrant, Kind, NewItemParams, Scope, Source, new_context_item
+from unictx.items.repo import AccessRepo, ContextRepo, ItemFilter
 from unictx.storage.filestore import FileStore
 
 # ---------------------------------------------------------------------------
@@ -183,3 +184,39 @@ def test_fake_repo_update_and_delete_round_trip() -> None:
         repo.update(item)
     with pytest.raises(ItemNotFound):
         repo.delete(item.id)
+
+
+def test_fake_access_repo_satisfies_access_repo_protocol() -> None:
+    """FakeAccessRepo structurally conforms to AccessRepo."""
+    assert isinstance(FakeAccessRepo(), AccessRepo)
+
+    class _MissingMethods:
+        pass
+
+    assert not isinstance(_MissingMethods(), AccessRepo)
+
+
+def test_fake_access_repo_filters_by_as_scope_and_project() -> None:
+    """list_grants filters by as_scope, and project_id matches "all" or exact."""
+    repo = FakeAccessRepo(
+        grants=[
+            # Applies to all projects acting as project.
+            AccessGrant(as_scope=Scope.PROJECT, project_id="", target_scope=Scope.USER),
+            # Applies only to project P.
+            AccessGrant(as_scope=Scope.PROJECT, project_id="P", target_scope=Scope.GLOBAL),
+            # Wrong as_scope — never matches a project query.
+            AccessGrant(as_scope=Scope.GLOBAL, project_id="", target_scope=Scope.USER),
+        ]
+    )
+
+    # Project P sees both the all-projects grant and its own.
+    grants_p = repo.list_grants(Scope.PROJECT, "P")
+    assert {g.target_scope for g in grants_p} == {Scope.USER, Scope.GLOBAL}
+
+    # Project Q sees only the all-projects grant (not P-specific).
+    grants_q = repo.list_grants(Scope.PROJECT, "Q")
+    assert [g.target_scope for g in grants_q] == [Scope.USER]
+
+    # Global actor sees only its own-scope grant.
+    grants_global = repo.list_grants(Scope.GLOBAL)
+    assert [g.target_scope for g in grants_global] == [Scope.USER]

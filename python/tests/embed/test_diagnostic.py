@@ -19,7 +19,7 @@ from unictx.embed.embedder import ModelInfo
 @dataclass(slots=True)
 class _StubSchemaMeta:
     """Stub SchemaMeta returning a preset version (or raising)."""
-    version_value: str = "4"
+    version_value: str = "5"
     err: Exception | None = None
 
     def version(self) -> str:

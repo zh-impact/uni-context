@@ -194,8 +194,9 @@ class VectorStoreImpl:
         *,
         scopes: list[str] | None = None,
         kinds: list[str] | None = None,
+        project_id: str = "",
     ) -> list[VectorHit]:
-        """KNN query with optional scope/kind filter pushdown.
+        """KNN query with optional scope/kind/project_id filter pushdown.
 
         Returns hits ordered by ``distance`` ASC (best match first).
         Filters are pushed down to ``context_item`` via JOIN, so this
@@ -208,6 +209,13 @@ class VectorStoreImpl:
         The MATCH predicate against the embedding column is mandatory —
         without it vec0 falls back to a scan and ``distance`` isn't a
         valid column, surfacing as ``datatype mismatch``.
+
+        project_id (P1 access direction): when non-empty, restricts
+        project-scope rows to those whose project_id matches. Global
+        rows (scope='global') are never project-scoped and bypass this
+        predicate, so a PROJECT actor still sees shared global content.
+        This is the row-level isolation complement to the scope-level
+        convergence done in SearchService.
 
         Score: cosine distance ∈ ``[0, 2]`` → similarity ∈ ``[0, 1]``
         via ``score = 1 - distance / 2``. Higher = better.
@@ -228,6 +236,13 @@ class VectorStoreImpl:
         if kinds:
             parts.append(f"ci.kind IN ({', '.join(['?'] * len(kinds))})")
             args.extend(kinds)
+        if project_id:
+            # Project isolation: a PROJECT actor sees only its own
+            # project rows OR any global row (global is shared). User
+            # rows can't appear here because scope convergence already
+            # removed 'user' from scopes for a PROJECT actor.
+            parts.append("(ci.project_id = ? OR ci.scope = 'global')")
+            args.append(project_id)
         filter_sql = (" AND " + " AND ".join(parts)) if parts else ""
 
         args.append(k)
