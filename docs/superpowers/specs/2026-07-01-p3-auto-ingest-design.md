@@ -1,7 +1,8 @@
 # P3 — Auto-Ingest from Claude Code Sessions
 
-> **Status:** Design doc, revision 3 — 12 first-review findings + 4
-> second-review findings addressed. Awaiting third-pass review.
+> **Status:** Design doc, revision 4 — 12 first-review findings + 4
+> second-review findings + 2 third-review findings addressed.
+> Awaiting fourth-pass review.
 >
 > **Scope:** Hook-driven auto-ingest of Claude Code transcripts into
 > `project` scope as paired raw + AI-summary rows. Manual ingest
@@ -255,12 +256,24 @@ Behavior:
    INSERT INTO context_item (id, scope, kind, source, parent_id, content, …)
      VALUES (?, ?, ?, ?, ?, '', …)
      ON CONFLICT(id) DO UPDATE SET content='', any_embedding=0 ;
-   -- (c) summary status row
-   INSERT INTO context_summary (item_id, status, attempts, updated_at)
-     VALUES (?, 'pending', 0, ?)
-     ON CONFLICT(item_id) DO UPDATE SET status='pending', attempts=0 ;
+   -- (c) summary status row (model_slug is NOT NULL — must supply)
+   INSERT INTO context_summary (item_id, status, model_slug, attempts, updated_at)
+     VALUES (?, 'pending', ?, 0, ?)
+     ON CONFLICT(item_id) DO UPDATE SET status='pending', attempts=0,
+                                        model_slug=excluded.model_slug ;
    COMMIT;
    ```
+
+   The `model_slug` parameter is `cfg.summarizer.model` (the hook
+   already loaded config to decide whether to create the summary row
+   at all — `summarizer.enabled`). The `ON CONFLICT` clause rewrites
+   `model_slug` on re-ingest so the worker uses whatever model is
+   current at re-ingest time, not the one configured at first ingest.
+   This is necessary because §3.2 declares `model_slug TEXT NOT NULL`
+   with no `DEFAULT` — omitting it would raise
+   `NOT NULL constraint failed: context_summary.model_slug` and the
+   "exit 0 always" rule would silently swallow the error, leaving
+   summary pipeline dead with no visible failure.
 
    Rationale: if any of the three writes fails (e.g. disk full mid-write,
    `ON CONFLICT` schema drift), the user is left in a torn state — raw
@@ -566,7 +579,9 @@ JSON parsing, no structured extraction — that's a later phase).
 |---------|----------|
 | `summarizer.enabled = false` or section absent in config | Hook writes raw row only; no summary row, no `context_summary` entry |
 | LLM call fails (network, 4xx, 5xx) | `attempts += 1`, retry on next poll. After 3 attempts: `status='failed'`, summary row's `content` stays empty |
-| LLM returns empty / over-length response | Treat as failure, retry |
+| LLM returns empty response | Treat as failure, retry |
+| LLM returns over-length response (exceeds a sanity cap, default 50 KB — configurable via `summarizer.max_length`; **not** the 4 KB inline boundary) | Treat as failure (model ignored the prompt's word-count constraint), retry |
+| LLM returns response in the 4 KB – sanity-cap range (e.g. a 6 KB summary) | **Normal externalize path per §3.3** — content goes to FileStore, `content_uri` set, `content` cleared. NOT a failure. |
 | Raw row missing or FileStore missing | Mark `status='failed'` with `last_error`; do not retry (data issue, not transient) |
 
 Raw row is never affected by summary pipeline failures — it's the
@@ -585,6 +600,7 @@ summarizer:
   model: gpt-4o-mini
   api_key: sk-xxx
   prompt_template: ""            # optional; default shown in §7.3
+  max_length: 51200              # sanity cap in bytes; over-length → retry (§7.4)
 ```
 
 **Defaults logic** mirrors `EmbedderConfig`:
@@ -622,7 +638,9 @@ New `SummarizerConfig` BaseModel in `config.py`. **Same pattern as**
   doesn't apply to a text-out pipeline).
 - **Summarizer adds:** `prompt_template: str = ""` (summarizer-only;
   empty default falls back to the §7.3 built-in template at call
-  time).
+  time) and `max_length: int = 51200` (sanity cap in bytes; responses
+  exceeding this trigger retry per §7.4, distinct from the 4 KB
+  inline-vs-externalize boundary in §3.3).
 
 `Config.summarizer: SummarizerConfig = Field(default_factory=SummarizerConfig)`.
 
@@ -994,6 +1012,15 @@ installation, not via feature flags.
     (`f"embed: empty text for item {item_id}"`, includes id).
   - 🟢 #16: §9.2 documents symmetric slim_uri cleanup — drop the key
     from `source_meta` if new slim fits inline but old had overflow.
+- **Codebase consistency (revision 4 — third review):**
+  - 🔴 #17: §4.1 `context_summary` INSERT now includes `model_slug`
+    (NOT NULL constraint, no DEFAULT) + `ON CONFLICT` rewrites it on
+    re-ingest so worker uses current model. Without this fix the
+    silent-exit-0 path would have left the summary pipeline dead.
+  - 🟡 #18: §7.4 + §3.3 + §8.1 + §8.3 — clarify "over-length" means
+    a configurable sanity cap (default 50 KB), distinct from the 4 KB
+    inline-vs-externalize boundary. 4 KB–50 KB responses follow §3.3
+    externalize, not failure.
 - **Scope check:** single subsystem (auto-ingest), single source
   (Claude Code), single new table. Fits one plan.
 - **Ambiguity check:** "non-git CWD" is fully specified (§5.4); "hook
